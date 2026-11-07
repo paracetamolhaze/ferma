@@ -6,9 +6,7 @@
   --muted: #8a929d;
   --border: #e7e9ed;
   --accent: #247453;
-  --font-sans:
-    "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
 }
 * {
   box-sizing: border-box;
@@ -20,7 +18,6 @@ body {
   font-family: var(--font-sans);
   font-size: 13px;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 button,
 input,
