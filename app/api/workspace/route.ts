@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { getDb } from "@/db";
 import { profiles, channels, media, posts, profileIntegrations } from "@/db/schema";
-import { NETWORKS, validateSchedule, validateTargets } from "@/lib/domain";
+import { validateSchedule, validateTargets } from "@/lib/domain";
 import { createZernioClient, ProviderError } from "@/lib/zernio";
 import { canSaveIntegrationKey } from '@/lib/integration-settings';
 import { importSocialAccounts } from '@/lib/social-import';
@@ -19,7 +19,7 @@ const inputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("importAccounts"), profileId: id, remoteProfileId: z.string().min(1).max(200).optional(), accountIds: z.array(z.string().min(1).max(200)).max(2).optional() }),
   z.object({ action: z.literal("sync"), profileId: id.optional() }),
   z.object({ action: z.literal("draft"), id: id.optional(), profileId: id, title: z.string().trim().min(1).max(100), content: z.string().max(5000), mediaId: id.nullable(), platforms: z.array(network).max(2) }),
-  z.object({ action: z.literal("schedule"), id, scheduledFor: z.string() }),
+  z.object({ action: z.literal("schedule"), id, scheduledFor: z.string().nullish(), queue: z.boolean().optional() }),
   z.object({ action: z.literal("deleteDraft"), id }),
 ]);
 const now = () => new Date().toISOString();
@@ -58,7 +58,7 @@ export async function GET() {
   const [cs, ms, ts, keys, mail] = await Promise.all([
     ps.length ? db.select().from(channels).where(inArray(channels.profileId, ps.map(p => p.id))) : [],
     db.select({ id: media.id, name: media.name, type: media.type, size: media.size, createdAt: media.createdAt }).from(media).where(eq(media.owner, user.userId)).orderBy(desc(media.createdAt)),
-    db.select({ id: posts.id, profileId: posts.profileId, title: posts.title, content: posts.content, mediaId: posts.mediaId, platforms: posts.platforms, status: posts.status, scheduledFor: posts.scheduledFor, error: posts.error, createdAt: posts.createdAt }).from(posts).where(eq(posts.owner, user.userId)).orderBy(desc(posts.createdAt)),
+    db.select({ id: posts.id, profileId: posts.profileId, zernioId: posts.zernioId, title: posts.title, content: posts.content, mediaId: posts.mediaId, platforms: posts.platforms, status: posts.status, scheduledFor: posts.scheduledFor, error: posts.error, createdAt: posts.createdAt }).from(posts).where(eq(posts.owner, user.userId)).orderBy(desc(posts.createdAt)),
     db.select({ profileId: profileIntegrations.profileId }).from(profileIntegrations).where(eq(profileIntegrations.owner, user.userId)),
     readMailSettings(user.userId),
   ]);
@@ -132,7 +132,10 @@ export async function POST(request: Request) {
       if (!post.payload || Date.parse(post.scheduledFor || "") < Date.now()) throw new Error("Проверьте публикацию в Zernio перед повторной отправкой: запланированное время уже прошло.");
       payload = JSON.parse(post.payload);
     } else {
-      const scheduledFor = validateSchedule(input.scheduledFor);
+      const timing = input.queue
+        ? { queuedFromProfile: (await ownedProfile(owner, post.profileId)).zernioId }
+        : { scheduledFor: validateSchedule(input.scheduledFor || "") };
+      if ("queuedFromProfile" in timing && !timing.queuedFromProfile) throw new Error("Сначала загрузите соцсети в настройках профиля.");
       const targets: string[] = JSON.parse(post.platforms);
       const connected = await db.select().from(channels).where(and(eq(channels.profileId, post.profileId), eq(channels.state, "connected")));
       if (targets.some(p => !connected.some(c => c.platform === p && c.accountId))) throw new Error("Подключите выбранные соцсети перед планированием.");
@@ -149,14 +152,15 @@ export async function POST(request: Request) {
         if (!upload.ok) throw new Error("Не удалось передать файл в Zernio. Черновик сохранён.");
         mediaItems.push({ type: m.type.startsWith("video/") ? "video" : "image", url: signed.publicUrl });
       }
-      payload = { title: post.title, content: post.content, mediaItems, scheduledFor, timezone: "Asia/Qyzylorda", platforms: targets.map(platform => ({ platform, accountId: connected.find(c => c.platform === platform)!.accountId, ...(platform === "youtube" ? { platformSpecificData: { title: post.title, visibility: "public" } } : {}) })) };
+      payload = { title: post.title, content: post.content, mediaItems, ...timing, timezone: "Asia/Qyzylorda", platforms: targets.map(platform => ({ platform, accountId: connected.find(c => c.platform === platform)!.accountId, ...(platform === "youtube" ? { platformSpecificData: { title: post.title, visibility: "public" } } : {}) })) };
     }
-    const lock = await db.update(posts).set({ status: "sending", payload: JSON.stringify(payload), scheduledFor: String(payload.scheduledFor), error: null }).where(and(eq(posts.id, post.id), eq(posts.status, post.status), sql`exists (select 1 from profile_integrations where profileId = ${post.profileId} and fingerprint = ${credential?.fingerprint || ''})`)).returning({ id: posts.id });
+    const lock = await db.update(posts).set({ status: "sending", payload: JSON.stringify(payload), scheduledFor: typeof payload.scheduledFor === "string" ? payload.scheduledFor : null, error: null }).where(and(eq(posts.id, post.id), eq(posts.status, post.status), sql`exists (select 1 from profile_integrations where profileId = ${post.profileId} and fingerprint = ${credential?.fingerprint || ''})`)).returning({ id: posts.id });
     if (!lock.length) throw new Error("Публикация уже отправляется или ключ профиля изменён. Обновите страницу.");
     try {
-      const data = providerResult(z.object({post:z.object({_id:z.string().min(1)})}), await zernio("/posts", { method: "POST", body: JSON.stringify(payload) }, `post-${post.id}`));
+      const data = providerResult(z.object({post:z.object({_id:z.string().min(1),scheduledFor:z.string().nullish()})}), await zernio("/posts", { method: "POST", body: JSON.stringify(payload) }, `post-${post.id}`));
       if (!data.post?._id) throw new Error("Zernio не вернул ID публикации. Проверьте статус перед повтором.");
-      await db.update(posts).set({ status: "scheduled", zernioId: data.post._id, error: null }).where(eq(posts.id, post.id));
+      // A queued post learns its time from the slot Zernio assigned.
+      await db.update(posts).set({ status: "scheduled", zernioId: data.post._id, error: null, ...(data.post.scheduledFor ? { scheduledFor: data.post.scheduledFor } : {}) }).where(eq(posts.id, post.id));
       return json({ ok: true });
     } catch (error) {
       const certain = error instanceof ProviderError && error.status >= 400 && error.status < 500 && error.status !== 409;

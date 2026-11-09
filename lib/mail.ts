@@ -3,6 +3,7 @@ import { and, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { getDb } from '@/db';
 import { mailSettings, profiles } from '@/db/schema';
+import { extractCode } from './mail-codes';
 import { decryptSecret, encryptSecret } from './secret-crypto';
 
 export class MailError extends Error {
@@ -35,11 +36,19 @@ const summary = z.object({
 });
 const envelope = <T extends z.ZodTypeAny>(data: T) => z.object({ success: z.literal(true), data });
 const listResponse = envelope(z.object({ emails: z.array(summary), total: z.number() }));
-const messageResponse = envelope(summary.extend({ html_content: z.string().nullable(), text_content: z.string().nullable() }));
-export type MailSummary = z.infer<typeof summary>;
-export type MailMessage = z.infer<typeof messageResponse>['data'];
+const message = summary.extend({ html_content: z.string().nullable(), text_content: z.string().nullable() });
+const messageResponse = envelope(message);
+const exportResponse = envelope(z.object({ emails: z.array(message), total: z.number() }));
+export type MailSummary = z.infer<typeof summary> & { code: string | null };
+export type MailMessage = z.infer<typeof message>;
+export type RecentMail = MailSummary & { profileId: string };
+// Bodies stay on the server: a list carries only the code found in them.
+const withCode = (mail: MailMessage): MailSummary => ({
+  id: mail.id, from_address: mail.from_address, to_address: mail.to_address, subject: mail.subject, received_at: mail.received_at,
+  attachment_count: mail.attachment_count, code: extractCode(mail.subject, mail.text_content),
+});
 
-async function callMailClaw<T>(baseUrl: string, token: string, path: string, schema: z.ZodType<T>): Promise<T> {
+async function callMailClaw<T>(baseUrl: string, token: string, path: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>): Promise<T> {
   let response: Response;
   try {
     // Redirects stay unfollowed so the bearer token cannot be forwarded to another host.
@@ -108,8 +117,24 @@ async function mailbox(owner: string, profileId: string) {
 }
 export async function listProfileMail(owner: string, profileId: string) {
   const { address, baseUrl, token } = await mailbox(owner, profileId);
-  const { data } = await callMailClaw(baseUrl, token, `/api/emails?limit=50&to=${encodeURIComponent(address)}`, listResponse);
-  return { address, total: data.total, emails: data.emails };
+  const { data } = await callMailClaw(baseUrl, token, `/api/emails/export?limit=30&to=${encodeURIComponent(address)}`, exportResponse);
+  return { address, total: data.total, emails: data.emails.map(withCode) };
+}
+export async function listRecentMail(owner: string): Promise<RecentMail[]> {
+  const saved = await savedSettings(owner);
+  if (!saved) return [];
+  const owned = await getDb().select({ id: profiles.id, emailLocal: profiles.emailLocal }).from(profiles).where(eq(profiles.owner, owner));
+  const byAddress = new Map(owned.filter(item => item.emailLocal).map(item => [`${item.emailLocal}@${saved.domain}`, item.id]));
+  if (!byAddress.size) return [];
+  let token: string;
+  try { token = await decryptSecret(saved.encryptedToken, encryptionKey(), tokenContext(owner)); }
+  catch { throw new MailError('Не удалось прочитать токен почты. Сохраните его заново в настройках.', 500); }
+  const { data } = await callMailClaw(saved.baseUrl, token, '/api/emails/export?limit=50', exportResponse);
+  // One token opens the whole domain: only mail addressed to the owner's profiles passes.
+  return data.emails.flatMap(email => {
+    const profileId = byAddress.get(email.to_address.toLowerCase());
+    return profileId ? [{ ...withCode(email), profileId }] : [];
+  });
 }
 export async function readProfileMail(owner: string, profileId: string, id: string) {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new MailError('Письмо не найдено.', 404);

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { getChatGPTUser } from '../../chatgpt-auth';
-import { listProfileMail, MailError, readProfileMail, saveMailSettings, saveProfileAddress } from '@/lib/mail';
+import { listProfileMail, listRecentMail, MailError, readProfileMail, saveMailSettings, saveProfileAddress } from '@/lib/mail';
 
 export const dynamic = 'force-dynamic';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store', Pragma: 'no-cache' } });
@@ -15,6 +15,10 @@ export async function GET(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return json({ error: 'Войдите в аккаунт.' }, 401);
   const params = new URL(request.url).searchParams;
+  if (params.get('recent')) {
+    try { return json({ emails: await listRecentMail(user.userId) }); }
+    catch (error) { return failure(error); }
+  }
   const profile = profileId.safeParse(params.get('profileId'));
   if (!profile.success) return json({ error: 'Профиль не найден.' }, 404);
   const id = params.get('id');

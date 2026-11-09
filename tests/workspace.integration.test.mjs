@@ -44,7 +44,7 @@ test('workspace lifecycle: ownership, media, drafts, scheduling, retry and statu
       submissions.push({key:request.headers.get('idempotency-key'),payload:await request.json()});
       if (postMode==='uncertain') return Response.json({error:'Temporary failure'},{status:503});
       if (postMode==='rejected') return Response.json({error:'Caption rejected'},{status:422});
-      return Response.json({post:{_id:'remote-post'}});
+      return Response.json({post:{_id:'remote-post',...(submissions.at(-1).payload.queuedFromProfile?{scheduledFor:'2030-01-01T00:00:00.000Z'}:{})}});
     }
     if (url.pathname.endsWith('/posts/remote-post')) return Response.json({post:{status:postStatus,platforms:[]}});
     throw new Error(`Unexpected provider request: ${request.method} ${url.pathname}`);
@@ -133,6 +133,16 @@ test('workspace lifecycle: ownership, media, drafts, scheduling, retry and statu
   postMode='ok';
   const pendingId=(await call({...draft,title:'Scheduled in old account'})).data.id;
   assert.equal((await call({action:'schedule',id:pendingId,scheduledFor:when})).status,200);
+  const queuedId=(await call({...draft,title:'Goes to the queue'})).data.id;
+  assert.equal((await call({action:'schedule',id:queuedId,queue:true})).status,200);
+  const queued=submissions.at(-1).payload;
+  assert.equal(queued.queuedFromProfile,'remote-profile');
+  assert.equal(queued.scheduledFor,undefined);
+  const queuedPost=(await call()).data.posts.find(p=>p.id===queuedId);
+  assert.deepEqual([queuedPost.status,queuedPost.scheduledFor],['scheduled','2030-01-01T00:00:00.000Z']);
+  const noTimeId=(await call({...draft,title:'No time given'})).data.id;
+  assert.equal((await call({action:'schedule',id:noTimeId})).status,400);
+  assert.equal((await call({action:'deleteDraft',id:noTimeId})).status,200);
   const unsentId=(await call({...draft,title:'Unsent draft'})).data.id;
   assert.equal((await call({profileId,apiKey:'fixture-profile-key'},{route:'/api/settings'})).status,200);
   assert.equal((await db.prepare('SELECT zernioId FROM profiles WHERE id=?').bind(profileId).first()).zernioId,'remote-profile');
