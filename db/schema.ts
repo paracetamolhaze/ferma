@@ -1,9 +1,19 @@
 import { sqliteTable, text, integer, uniqueIndex, check } from "drizzle-orm/sqlite-core";
 import { sql } from "drizzle-orm";
+export const integrations = sqliteTable("integrations", {
+  owner: text().primaryKey(), encryptedKey: text().notNull(), updatedAt: text().notNull(),
+});
+export const profileIntegrations = sqliteTable("profile_integrations", {
+  profileId: text().primaryKey().references(() => profiles.id),
+  owner: text().notNull(), encryptedKey: text().notNull(), fingerprint: text().notNull(), updatedAt: text().notNull(),
+}, t => [uniqueIndex('profile_key_unique').on(t.owner, t.fingerprint)]);
 export const profiles = sqliteTable("profiles", {
   id: text().primaryKey(), owner: text().notNull(), name: text().notNull(),
   description: text().notNull().default(""), color: text().notNull().default("#d7e7c4"),
-  zernioId: text(), createdAt: text().notNull(),
+  zernioId: text(), accountSelection: text(), emailLocal: text(), createdAt: text().notNull(),
+}, t => [uniqueIndex('profile_remote_unique').on(t.owner, t.zernioId), uniqueIndex('profile_email_unique').on(t.owner, t.emailLocal)]);
+export const mailSettings = sqliteTable("mail_settings", {
+  owner: text().primaryKey(), baseUrl: text().notNull(), domain: text().notNull(), encryptedToken: text().notNull(), updatedAt: text().notNull(),
 });
 export const channels = sqliteTable("channels", {
   id: text().primaryKey(), profileId: text().notNull().references(() => profiles.id),

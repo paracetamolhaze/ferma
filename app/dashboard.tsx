@@ -24,6 +24,7 @@ import {
   LayoutGrid,
   Link2,
   Loader2,
+  Mail,
   Plus,
   RefreshCw,
   Search,
@@ -40,13 +41,22 @@ import {
   ExternalLink,
   AlertCircle,
 } from "lucide-react";
-import { NETWORKS, MAX_UPLOAD } from "@/lib/domain";
+import { NETWORKS, MAX_UPLOAD, validateTargets, isProfileReady } from "@/lib/domain";
+import { requestJson } from '@/lib/client-api';
+import ProfileKeyForm from "./profile-key-form";
+import ProfileNameForm from "./profile-name-form";
+import ProfileSocialAccounts from "./profile-social-accounts";
+import ProfileMail from "./profile-mail";
+import MailSettingsForm from "./mail-settings-form";
+import { profileColors, colorText } from '@/lib/profile-colors';
 
 type Profile = {
+  configured: boolean;
   id: string;
   name: string;
   description: string;
   color: string;
+  emailLocal: string | null;
   createdAt: string;
 };
 type Channel = {
@@ -80,14 +90,16 @@ type State = {
   channels: Channel[];
   media: Media[];
   posts: Post[];
-  configured: boolean;
+  canSaveKey: boolean;
+  mail: { baseUrl: string; domain: string } | null;
 };
 const initial: State = {
   profiles: [],
   channels: [],
   media: [],
   posts: [],
-  configured: false,
+  canSaveKey: false,
+  mail: null,
 };
 const names: Record<string, string> = {
   draft: "Черновик",
@@ -98,8 +110,8 @@ const names: Record<string, string> = {
   failed: "Ошибка",
   partial: "Частично",
   processing: "В обработке",
+  external: "В прежнем кабинете",
 };
-const colors = ["#dce8c8", "#e4dcf1", "#f4dfca", "#d7e8ec", "#f0dce0"];
 const date = (value: string) =>
   new Date(value).toLocaleString("ru-RU", {
     timeZone: "Asia/Qyzylorda",
@@ -180,9 +192,24 @@ export default function Home() {
   const [filter, setFilter] = useState("all");
   const [profileModal, setProfileModal] = useState(false);
   const [detail, setDetail] = useState<Profile | null>(null);
-  const [color, setColor] = useState(colors[0]);
+  const [syncRevision, setSyncRevision] = useState(0);
+  const [color, setColor] = useState<string>('#3b82f6');
+  const [colorHex, setColorHex] = useState('#3b82f6');
+  function chooseColor(value: string) { setColor(value); setColorHex(value); }
+  const configuredCount = state.profiles.filter(profile => profile.configured).length;
+  const hasConfiguredProfiles = configuredCount > 0;
+  const profileConfigured = (profileId?: string) => Boolean(state.profiles.find(profile => profile.id === profileId)?.configured);
+  const detailConfigured = profileConfigured(detail?.id);
   const [editor, setEditor] = useState<Partial<Post> | null>(null);
   const [schedule, setSchedule] = useState<Post | null>(null);
+  const [minimumScheduleDate, setMinimumScheduleDate] = useState('');
+  function openSchedule(post: Post) {
+    setError('');
+    // Called only by click handlers; the lower bound is captured when the form opens.
+    // eslint-disable-next-line react-hooks/purity
+    setMinimumScheduleDate(new Date(Date.now() + 5 * 3600000 + 120000).toISOString().slice(0, 16));
+    setSchedule(post);
+  }
   const [preview, setPreview] = useState<Media | null>(null);
   const [uploading, setUploading] = useState(0);
   const [uploadActive, setUploadActive] = useState(false);
@@ -194,25 +221,19 @@ export default function Home() {
   const searchRef = useRef<HTMLInputElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   async function reload() {
-    const r = await fetch("/api/workspace");
-    const data = (await r.json()) as State & { error?: string };
-    if (!r.ok) throw new Error(data.error || "Не удалось загрузить данные.");
+    const data = await requestJson<State>("/api/workspace");
     setState(data);
+    setDetail(current => current ? data.profiles.find(profile => profile.id === current.id) || null : null);
+    setSchedule(current => current ? data.posts.find(post => post.id === current.id) || null : null);
     setLoading(false);
+    return data;
   }
   async function action(body: Record<string, unknown>) {
-    const r = await fetch("/api/workspace", {
+    return requestJson<{ id?: string }>("/api/workspace", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const data = (await r.json()) as {
-      error?: string;
-      authUrl: string;
-      id?: string;
-    };
-    if (!r.ok) throw new Error(data.error || "Не удалось выполнить действие.");
-    return data;
   }
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -220,28 +241,17 @@ export default function Home() {
     try {
       await fn();
     } catch (e) {
+      // Provider failures may persist an uncertain status; show the stored result.
+      await reload().catch(() => undefined);
       setError(e instanceof Error ? e.message : "Что-то пошло не так.");
     } finally {
       setBusy(false);
     }
   }
   useEffect(() => {
+    // Initial network load: reload updates state only after the request resolves.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void reload()
-      .then(async () => {
-        const params = new URLSearchParams(location.search);
-        if (params.has("oauth")) {
-          history.replaceState({}, "", "/");
-          if (params.has("error")) {
-            setError(
-              "Авторизация не завершена. Повторите подключение и разрешите доступ к соцсети.",
-            );
-            return;
-          }
-          await action({ action: "sync" });
-          await reload();
-          setNotice("Статусы подключений обновлены.");
-        }
-      })
       .catch((e) => {
         setLoading(false);
         setError(e.message);
@@ -264,6 +274,8 @@ export default function Home() {
   useEffect(() => {
     const initialTab = location.hash.slice(1);
     if (["profiles", "content", "library", "settings"].includes(initialTab))
+      // The hash is a browser-only navigation source; read it after hydration.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTab(initialTab);
     const onKey = (event: KeyboardEvent) => {
       const element = event.target as HTMLElement;
@@ -281,6 +293,7 @@ export default function Home() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
   function compose(profileId?: string, mediaId?: string) {
+    setError("");
     if (!state.profiles.length) {
       setProfileModal(true);
       setNotice("Сначала создайте профиль для публикации.");
@@ -318,6 +331,7 @@ export default function Home() {
         await new Promise<void>((resolve, reject) => {
           const xhr = new XMLHttpRequest();
           xhr.open("POST", "/api/media");
+          xhr.timeout = 180000;
           xhr.setRequestHeader("Content-Type", file.type);
           xhr.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
           xhr.upload.onprogress = (e) => {
@@ -326,9 +340,14 @@ export default function Home() {
           };
           xhr.onerror = () =>
             reject(new Error("Связь прервалась. Повторите загрузку."));
+          xhr.ontimeout = () => reject(new Error("Загрузка заняла слишком много времени. Повторите попытку."));
           xhr.onload = () => {
             if (xhr.status >= 200 && xhr.status < 300) {
-              const uploaded = JSON.parse(xhr.responseText);
+              let uploaded: { id: string };
+              try {
+                uploaded = JSON.parse(xhr.responseText);
+                if (!uploaded.id) throw new Error('missing id');
+              } catch { reject(new Error("Сервер не подтвердил сохранение файла. Обновите медиатеку.")); return; }
               setEditor((current) =>
                 current ? { ...current, mediaId: uploaded.id } : null,
               );
@@ -354,6 +373,16 @@ export default function Home() {
     }
   }
   const connected = state.channels.filter((c) => c.state === "connected");
+  let scheduleIssue = '';
+  if (schedule?.status === 'draft') {
+    const selectedMedia = state.media.find(item => item.id === schedule.mediaId);
+    const targets: string[] = JSON.parse(schedule.platforms);
+    try {
+      validateTargets(targets, schedule.content, selectedMedia?.type.startsWith('video/') ? 'video' : selectedMedia ? 'image' : undefined);
+      if (targets.some(platform => !connected.some(channel => channel.profileId === schedule.profileId && channel.platform === platform))) throw new Error('Обновите соцсети в профиле и выберите подключённые аккаунты.');
+      if (!schedule.content.trim() && !selectedMedia) throw new Error('Добавьте подпись или файл.');
+    } catch (error) { scheduleIssue = error instanceof Error ? error.message : 'Проверьте черновик.'; }
+  }
   const filteredProfiles = state.profiles.filter(
     (p) =>
       `${p.name} ${p.description}`
@@ -361,8 +390,8 @@ export default function Home() {
         .includes(query.toLowerCase()) &&
       (filter === "all" ||
         (filter === "ready"
-          ? connected.filter((c) => c.profileId === p.id).length === 2
-          : connected.filter((c) => c.profileId === p.id).length < 2)),
+          ? isProfileReady(connected.filter((c) => c.profileId === p.id).length)
+          : !isProfileReady(connected.filter((c) => c.profileId === p.id).length))),
   );
   const title = {
     profiles: "Профили",
@@ -378,13 +407,13 @@ export default function Home() {
   }[tab];
   const draftCount = state.posts.filter((p) => p.status === "draft").length;
   const readyCount = state.profiles.filter(
-    (p) => connected.filter((c) => c.profileId === p.id).length === 2,
+    (p) => isProfileReady(connected.filter((c) => c.profileId === p.id).length),
   ).length;
   const visiblePosts = state.posts.filter(
     (p) =>
       (postFilter === "all" ||
         (postFilter === "attention"
-          ? ["failed", "uncertain", "partial"].includes(p.status)
+          ? ["failed", "uncertain", "partial", "external"].includes(p.status)
           : p.status === postFilter)) &&
       (contentProfile === "all" || p.profileId === contentProfile) &&
       `${p.title} ${p.content}`.toLowerCase().includes(query.toLowerCase()),
@@ -424,7 +453,7 @@ export default function Home() {
         Перейти к содержимому
       </a>
       <aside className="sidebar">
-        <a className="brand" href="/" aria-label="Ferma — главная">
+        <button className="brand" onClick={() => navigate('profiles')} aria-label="Ferma — главная">
           <span className="brand-icon">
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
               <path
@@ -436,7 +465,7 @@ export default function Home() {
             </svg>
           </span>
           ferma<span className="brand-label">WORKSPACE</span>
-        </a>
+        </button>
         <div className="workspace">
           <span className="workspace-avatar">F</span>
           <div>
@@ -485,14 +514,12 @@ export default function Home() {
             onClick={() => navigate("settings")}
           >
             <span
-              className={`integration-dot ${state.configured ? "on" : ""}`}
+              className={`integration-dot ${hasConfiguredProfiles ? "on" : ""}`}
             />
             <div>
               <strong>Zernio</strong>
               <small>
-                {state.configured
-                  ? "Интеграция настроена"
-                  : "Ожидает подключения"}
+                Ключи: {configuredCount} из {state.profiles.length}
               </small>
             </div>
             <ChevronRight size={14} />
@@ -555,9 +582,9 @@ export default function Home() {
                 {tab === "profiles" && state.profiles.length > 0 && (
                   <button
                     className="secondary"
-                    disabled={busy || !state.configured}
+                    disabled={busy || !hasConfiguredProfiles}
                     title={
-                      state.configured
+                      hasConfiguredProfiles
                         ? "Обновить подключения"
                         : "Сначала подключите Zernio"
                     }
@@ -654,14 +681,14 @@ export default function Home() {
             <>
               {tab === "profiles" && (
                 <>
-                  {!state.configured && (
+                  {(!state.profiles.length || state.profiles.some(profile => !profile.configured)) && (
                     <div className="integration-banner">
                       <Link2 size={18} />
                       <div>
                         <strong>Подключите Zernio</strong>
                         <span>
                           {" "}
-                          для авторизации соцсетей и публикации контента.
+                          для загрузки соцсетей из Zernio и публикации контента.
                         </span>
                       </div>
                       <button
@@ -722,8 +749,8 @@ export default function Home() {
                         <button onClick={() => navigate("settings")}>
                           <span className="step-number">2</span>
                           <div>
-                            <strong>Подключите соцсети</strong>
-                            <p>До двух на каждый профиль</p>
+                            <strong>Подтяните соцсети</strong>
+                            <p>Из вашего кабинета Zernio</p>
                           </div>
                           <ArrowUpRight size={16} />
                         </button>
@@ -816,7 +843,7 @@ export default function Home() {
                                 >
                                   <span
                                     className="profile-avatar"
-                                    style={{ background: p.color }}
+                                    style={{ background: p.color, color: colorText(p.color) }}
                                   >
                                     {p.name.slice(0, 2).toUpperCase()}
                                   </span>
@@ -857,7 +884,7 @@ export default function Home() {
                                       <button
                                         key={slot}
                                         className="empty-channel"
-                                        aria-label={`Подключить соцсеть ${slot + 1} для ${p.name}`}
+                                        aria-label={`Посмотреть соцсети ${slot + 1} для ${p.name}`}
                                         onClick={() => setDetail(p)}
                                       >
                                         <Plus size={14} />
@@ -866,14 +893,10 @@ export default function Home() {
                                   )}
                                 </div>
                                 <span
-                                  className={`pill ${count === 2 ? "success" : count ? "progress" : "neutral"}`}
+                                  className={`pill ${isProfileReady(count) ? "success" : "neutral"}`}
                                 >
                                   <span className="status-dot" />
-                                  {count === 2
-                                    ? "Подключён"
-                                    : count
-                                      ? `${count} из 2 подключено`
-                                      : "Не подключён"}
+                                  {isProfileReady(count) ? "Подключён" : "Не подключён"}
                                 </span>
                                 <button
                                   className="content-count"
@@ -911,7 +934,7 @@ export default function Home() {
                                 <div className="profile-card-top">
                                   <span
                                     className="profile-avatar"
-                                    style={{ background: p.color }}
+                                    style={{ background: p.color, color: colorText(p.color) }}
                                   >
                                     {p.name.slice(0, 2).toUpperCase()}
                                   </span>
@@ -957,7 +980,7 @@ export default function Home() {
                                         onClick={() => setDetail(p)}
                                       >
                                         <Plus size={15} />
-                                        Подключить соцсеть
+                                        Соцсети из Zernio
                                       </button>
                                     ),
                                   )}
@@ -1001,7 +1024,7 @@ export default function Home() {
                         <p>
                           {state.profiles.length
                             ? "Измените поисковый запрос или выберите другой фильтр."
-                            : "Создайте профиль, чтобы подключить соцсети и назначать ему контент."}
+                            : "Создайте профиль, добавьте его ключ Zernio и загрузите контент."}
                         </p>
                         {state.profiles.length ? (
                           <button
@@ -1114,7 +1137,7 @@ export default function Home() {
                           <div className="media-info">
                             <h3 title={m.name}>{m.name}</h3>
                             <small>
-                              {(m.size / 1024 / 1024).toFixed(1)} МБ
+                              {m.size < 1024 ? `${m.size} Б` : m.size < 1024 * 1024 ? `${(m.size / 1024).toFixed(1)} КБ` : `${(m.size / 1024 / 1024).toFixed(1)} МБ`}
                               <span>·</span>
                               {date(m.createdAt)}
                             </small>
@@ -1172,7 +1195,7 @@ export default function Home() {
                           id: "attention",
                           text: "Требуют внимания",
                           count: state.posts.filter((p) =>
-                            ["failed", "uncertain", "partial"].includes(
+                            ["failed", "uncertain", "partial", "external"].includes(
                               p.status,
                             ),
                           ).length,
@@ -1211,9 +1234,9 @@ export default function Home() {
                     </div>
                     <button
                       className="secondary"
-                      disabled={busy || !state.configured}
+                      disabled={busy || !hasConfiguredProfiles}
                       title={
-                        !state.configured
+                        !hasConfiguredProfiles
                           ? "Сначала подключите Zernio"
                           : "Получить актуальные статусы"
                       }
@@ -1265,7 +1288,7 @@ export default function Home() {
                           ))}
                         </div>
                         <span
-                          className={`pill ${p.status === "published" ? "success" : p.status === "scheduled" ? "progress" : ["failed", "uncertain", "partial"].includes(p.status) ? "danger" : "neutral"}`}
+                          className={`pill ${p.status === "published" ? "success" : p.status === "scheduled" ? "progress" : ["failed", "uncertain", "partial", "external"].includes(p.status) ? "danger" : "neutral"}`}
                         >
                           <span className="status-dot" />
                           {names[p.status] || p.status}
@@ -1276,13 +1299,13 @@ export default function Home() {
                               className="icon-button"
                               title="Редактировать"
                               aria-label={`Редактировать ${p.title}`}
-                              onClick={() => setEditor(p)}
+                              onClick={() => { setError(''); setEditor(p); }}
                             >
                               <Pencil size={16} />
                             </button>
                             <button
                               className="secondary"
-                              onClick={() => setSchedule(p)}
+                              onClick={() => openSchedule(p)}
                             >
                               Запланировать
                             </button>
@@ -1300,7 +1323,7 @@ export default function Home() {
                         {p.status === "uncertain" && (
                           <button
                             className="secondary"
-                            onClick={() => setSchedule(p)}
+                            onClick={() => openSchedule(p)}
                           >
                             Проверить отправку
                           </button>
@@ -1363,10 +1386,10 @@ export default function Home() {
                         <p>Подключение и публикация в соцсети</p>
                       </div>
                       <span
-                        className={`pill ${state.configured ? "success" : "neutral"}`}
+                        className={`pill ${hasConfiguredProfiles ? "success" : "neutral"}`}
                       >
                         <span className="status-dot" />
-                        {state.configured ? "Настроено" : "Не подключено"}
+                        {configuredCount} из {state.profiles.length} с ключом
                       </span>
                     </div>
                     <div className="settings-body">
@@ -1379,63 +1402,17 @@ export default function Home() {
                         ))}
                       </div>
                       <div className="settings-divider" />
-                      <h3>
-                        {state.configured
-                          ? "Управление подключением"
-                          : "Как подключить"}
-                      </h3>
-                      <ol className="steps">
-                        <li>
-                          <span>1</span>
-                          <div>
-                            <strong>Создайте API-ключ</strong>
-                            <p>
-                              В личном кабинете Zernio перейдите в раздел API
-                              keys.
-                            </p>
-                            <a
-                              href="https://zernio.com"
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Перейти в Zernio <ArrowUpRight size={14} />
-                            </a>
-                          </div>
-                        </li>
-                        <li>
-                          <span>2</span>
-                          <div>
-                            <strong>Добавьте ключ на сервер</strong>
-                            <p>
-                              Задайте переменную <code>ZERNIO_API_KEY</code> в
-                              настройках размещения и примените новое окружение.
-                            </p>
-                            <details>
-                              <summary>Для локального запуска</summary>
-                              <p>
-                                Добавьте ключ в файл <code>.dev.vars</code> и
-                                перезапустите сервер.
-                              </p>
-                            </details>
-                          </div>
-                        </li>
-                        <li>
-                          <span>3</span>
-                          <div>
-                            <strong>Авторизуйте соцсети</strong>
-                            <p>
-                              Откройте профиль и выберите до двух соцсетей.
-                              Авторизация пройдёт на стороне сервиса.
-                            </p>
-                            <button
-                              className="inline-button"
-                              onClick={() => navigate("profiles")}
-                            >
-                              Перейти к профилям <ArrowRight size={14} />
-                            </button>
-                          </div>
-                        </li>
-                      </ol>
+                      <h3>Ключи профилей</h3>
+                      <p className="muted">Каждому профилю нужен свой API-ключ Zernio. Откройте профиль, чтобы добавить или заменить его ключ.</p>
+                      <div className="profile-key-list">
+                        {state.profiles.map(profile => <button className="profile-key-list-item" key={profile.id} onClick={() => setDetail(profile)}>
+                          <span className="profile-avatar" style={{ background: profile.color, color: colorText(profile.color) }}>{profile.name.slice(0, 2).toUpperCase()}</span>
+                          <span><strong>{profile.name}</strong><small>{profile.configured ? 'Свой ключ добавлен' : 'Добавьте отдельный ключ'}</small></span>
+                          <ChevronRight size={17} />
+                        </button>)}
+                      </div>
+                      {!state.profiles.length && <button className="primary" onClick={() => setProfileModal(true)}><Plus size={16} />Создать профиль</button>}
+                      <a className="inline-button" href="https://zernio.com" target="_blank" rel="noreferrer">Открыть кабинет Zernio <ArrowUpRight size={14} /></a>
                     </div>
                     <footer className="settings-footer">
                       <span>
@@ -1444,7 +1421,7 @@ export default function Home() {
                       </span>
                       <button
                         className="secondary"
-                        disabled={busy || !state.configured}
+                        disabled={busy || !hasConfiguredProfiles}
                         onClick={() =>
                           run(async () => {
                             await action({ action: "sync" });
@@ -1457,6 +1434,22 @@ export default function Home() {
                         Проверить
                       </button>
                     </footer>
+                    <div className="settings-card-heading mail-settings-heading">
+                      <span className="settings-service-icon">
+                        <Mail size={23} />
+                      </span>
+                      <div>
+                        <h2>Почта</h2>
+                        <p>Свой адрес у каждого профиля через MailClaw</p>
+                      </div>
+                      <span className={`pill ${state.mail ? "success" : "neutral"}`}>
+                        <span className="status-dot" />
+                        {state.mail ? "Подключена" : "Не подключена"}
+                      </span>
+                    </div>
+                    <div className="settings-body">
+                      <MailSettingsForm key={state.mail ? `${state.mail.baseUrl} ${state.mail.domain}` : "new"} mail={state.mail} canSave={state.canSaveKey} onSaved={reload} />
+                    </div>
                   </section>
                   <div className="settings-aside">
                     <section className="settings-card">
@@ -1513,15 +1506,16 @@ export default function Home() {
               e.preventDefault();
               const data = new FormData(e.currentTarget);
               void run(async () => {
-                await action({
+                const created = await action({
                   action: "profile",
                   name: data.get("name"),
                   description: data.get("description"),
                   color,
                 });
-                await reload();
+                const latest = await reload();
                 setProfileModal(false);
-                setNotice("Профиль создан. Теперь можно подключить соцсети.");
+                setDetail(latest.profiles.find(profile => profile.id === created.id) || null);
+                setNotice("Профиль создан. Добавьте его API-ключ Zernio.");
               });
             }}
           >
@@ -1548,23 +1542,32 @@ export default function Home() {
                   placeholder="О чём проект и для кого ваш контент"
                 />
               </label>
-              <label>Цвет профиля</label>
+              <fieldset className="profile-color-field">
+              <legend>Цвет профиля</legend>
               <div className="color-picker">
-                {colors.map((c) => (
+                {profileColors.map(([c, name]) => (
                   <button
                     type="button"
                     key={c}
-                    aria-label={`Цвет ${c}`}
+                    aria-label={name}
+                    aria-pressed={color === c}
                     className={color === c ? "chosen" : ""}
-                    style={{ background: c }}
-                    onClick={() => setColor(c)}
+                    style={{ background: c, color: colorText(c) }}
+                    onClick={() => chooseColor(c)}
                   >
                     {color === c && <Check size={17} />}
                   </button>
                 ))}
               </div>
+              <div className="custom-profile-color">
+                <label htmlFor="custom-profile-color">Свой цвет</label>
+                <input id="custom-profile-color" type="color" value={color} onChange={event => chooseColor(event.target.value)} />
+                <input aria-label="HEX-код цвета" value={colorHex} pattern="#[0-9a-fA-F]{6}" title="Введите # и 6 символов: например, #3b82f6" maxLength={7} required spellCheck={false} onChange={event => { const value = event.target.value; setColorHex(value); if (/^#[0-9a-f]{6}$/i.test(value)) setColor(value.toLowerCase()); }} />
+                <span className="color-preview" style={{ background: color, color: colorText(color) }}>АБ</span>
+              </div>
+              </fieldset>
               <div className="form-note">
-                <Link2 size={17} />К профилю можно подключить две соцсети.
+                <Link2 size={17} />В профиль можно подтянуть до двух соцсетей из Zernio.
               </div>
               {error && (
                 <div className="error-text" role="alert">
@@ -1594,99 +1597,21 @@ export default function Home() {
             <div className="detail-intro">
               <span
                 className="profile-avatar"
-                style={{ background: detail.color }}
+                style={{ background: detail.color, color: colorText(detail.color) }}
               >
                 {detail.name.slice(0, 2).toUpperCase()}
               </span>
               <p>
-                {detail.description || "Выберите соцсети для этого профиля."}
+                {detail.description || "Соцсети загружаются из вашего кабинета Zernio."}
               </p>
             </div>
-            <div className="section-title">
-              <h3>Социальные сети</h3>
-              <span>
-                {state.channels.filter((c) => c.profileId === detail.id).length}{" "}
-                / 2 слота
-              </span>
-            </div>
-            <div className="connect-list">
-              {NETWORKS.map((n) => {
-                const c = state.channels.find(
-                  (c) => c.profileId === detail.id && c.platform === n.id,
-                );
-                const full =
-                  state.channels.filter((c) => c.profileId === detail.id)
-                    .length >= 2;
-                return (
-                  <div className="connect-row" key={n.id}>
-                    <Network platform={n.id} />
-                    <div>
-                      <strong>{n.name}</strong>
-                      <small>
-                        {c?.username
-                          ? `@${c.username.replace(/^@/, "")}`
-                          : c
-                            ? "Ожидает авторизации"
-                            : "Не подключено"}
-                      </small>
-                    </div>
-                    <button
-                      className="secondary"
-                      disabled={busy || !state.configured || (!c && full)}
-                      onClick={() =>
-                        run(async () => {
-                          const data = await action({
-                            action: "connect",
-                            profileId: detail.id,
-                            platform: n.id,
-                          });
-                          window.location.assign(data.authUrl);
-                        })
-                      }
-                    >
-                      {c?.state === "connected"
-                        ? "Переподключить"
-                        : c
-                          ? "Продолжить"
-                          : "Подключить"}
-                    </button>
-                    {c && !c.accountId && (
-                      <button
-                        className="icon-button"
-                        disabled={busy}
-                        aria-label={`Отменить подключение ${n.name}`}
-                        onClick={() =>
-                          run(async () => {
-                            await action({
-                              action: "cancelConnection",
-                              channelId: c.id,
-                            });
-                            await reload();
-                          })
-                        }
-                      >
-                        <X size={15} />
-                      </button>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-            {!state.configured && (
-              <div className="form-note">
-                <AlertCircle size={18} />
-                Сначала подключите Zernio.{" "}
-                <button
-                  className="inline-button"
-                  onClick={() => {
-                    setDetail(null);
-                    navigate("settings");
-                  }}
-                >
-                  Открыть настройки
-                </button>
-              </div>
-            )}
+            <ProfileNameForm key={`name-${detail.id}`} profileId={detail.id} name={detail.name} onSaved={reload} />
+            <details className="profile-key-details" open={!detailConfigured}>
+              <summary><ShieldCheck size={17} /><span>{detailConfigured ? 'API-ключ Zernio добавлен' : 'Добавьте API-ключ Zernio'}</span><ChevronDown size={16} /></summary>
+              <ProfileKeyForm key={detail.id} profileId={detail.id} name={detail.name} configured={detailConfigured} canSave={state.canSaveKey} onSaved={async () => { await reload(); setSyncRevision(value => value + 1); }} />
+            </details>
+            <ProfileSocialAccounts key={detail.id} profileId={detail.id} configured={detailConfigured} revision={syncRevision} channels={state.channels.filter(channel => channel.profileId === detail.id)} onUpdated={reload} />
+            <ProfileMail key={`mail-${detail.id}`} profileId={detail.id} emailLocal={detail.emailLocal} domain={state.mail?.domain || null} onSaved={reload} onOpenSettings={() => { setDetail(null); navigate("settings"); }} />
             {error && (
               <p className="error-text" role="alert">
                 {error}
@@ -1696,16 +1621,10 @@ export default function Home() {
           <div className="modal-footer">
             <button
               className="secondary"
-              disabled={busy || !state.configured}
-              onClick={() =>
-                run(async () => {
-                  await action({ action: "sync" });
-                  await reload();
-                })
-              }
+              disabled={busy}
+              onClick={() => setDetail(null)}
             >
-              <RefreshCw size={15} />
-              Обновить
+              Закрыть
             </button>
             <button
               className="primary"
@@ -1723,7 +1642,7 @@ export default function Home() {
       {editor && (
         <Modal
           title={editor.id ? "Редактировать черновик" : "Новая публикация"}
-          close={() => !busy && setEditor(null)}
+          close={() => !busy && !uploadActive && setEditor(null)}
           wide
         >
           <form
@@ -1737,7 +1656,7 @@ export default function Home() {
                 });
                 await reload();
                 setEditor(null);
-                setTab("content");
+                navigate("content");
                 setNotice("Черновик сохранён.");
               });
             }}
@@ -1883,7 +1802,7 @@ export default function Home() {
               <button
                 type="button"
                 className="secondary"
-                disabled={busy}
+                disabled={busy || uploadActive}
                 onClick={() => setEditor(null)}
               >
                 Отмена
@@ -1940,28 +1859,28 @@ export default function Home() {
                   required
                   name="date"
                   type="datetime-local"
-                  min={new Date(Date.now() + 5 * 3600000 + 120000)
-                    .toISOString()
-                    .slice(0, 16)}
+                  min={minimumScheduleDate}
                   disabled={schedule.status === "uncertain"}
+                  defaultValue={schedule.status === 'uncertain' && schedule.scheduledFor ? new Date(Date.parse(schedule.scheduledFor) + 5 * 3600000).toISOString().slice(0,16) : undefined}
                 />
               </label>
-              {!state.configured && (
+              {!profileConfigured(schedule.profileId) && (
                 <div className="form-note">
                   <AlertCircle size={17} />
-                  <span>Для планирования подключите Zernio в настройках.</span>
+                  <span>Для планирования добавьте ключ Zernio в этот профиль.</span>
                   <button
                     type="button"
                     className="inline-button"
                     onClick={() => {
                       setSchedule(null);
-                      navigate("settings");
+                      setDetail(state.profiles.find(profile => profile.id === schedule.profileId) || null);
                     }}
                   >
                     Настроить
                   </button>
                 </div>
               )}
+              {scheduleIssue && <div className="form-note" role="status"><AlertCircle size={17} /><span>{scheduleIssue}</span><button type="button" className="inline-button" onClick={() => { setEditor(schedule); setSchedule(null); setError(''); }}>Редактировать черновик</button></div>}
               <p className="muted">
                 В назначенное время Zernio отправит материал в выбранные
                 соцсети. Ограничения формата и доступов проверяются сервисом.
@@ -1987,7 +1906,7 @@ export default function Home() {
               >
                 Отмена
               </button>
-              <button className="primary" disabled={busy || !state.configured}>
+              <button className="primary" disabled={busy || !profileConfigured(schedule.profileId) || Boolean(scheduleIssue)}>
                 {busy ? (
                   <Loader2 size={16} className="spin" />
                 ) : (

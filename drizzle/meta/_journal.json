@@ -8,6 +8,41 @@
       "when": 1794039753300,
       "tag": "0000_stiff_moonstone",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1794044074394,
+      "tag": "0001_zernio_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1794045212728,
+      "tag": "0002_profile_zernio_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1794045478951,
+      "tag": "0003_remote_profile_isolation",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1794046289891,
+      "tag": "0004_imported_account_selection",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1794228759726,
+      "tag": "0005_profile_mail",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX `profile_remote_unique` ON `profiles` (`owner`,`zernioId`);

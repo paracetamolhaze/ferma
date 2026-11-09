@@ -1,44 +1,53 @@
 import { env } from "cloudflare:workers";
-import { and, eq, inArray, desc } from "drizzle-orm";
+import { and, eq, inArray, desc, sql } from "drizzle-orm";
 import { z } from "zod";
 import { getChatGPTUser } from "../../chatgpt-auth";
 import { getDb } from "@/db";
-import { profiles, channels, media, posts } from "@/db/schema";
+import { profiles, channels, media, posts, profileIntegrations } from "@/db/schema";
 import { NETWORKS, validateSchedule, validateTargets } from "@/lib/domain";
-import { isConfigured, zernio, ProviderError } from "@/lib/zernio";
+import { createZernioClient, ProviderError } from "@/lib/zernio";
+import { canSaveIntegrationKey } from '@/lib/integration-settings';
+import { importSocialAccounts } from '@/lib/social-import';
+import { readMailSettings } from '@/lib/mail';
 
 export const dynamic = "force-dynamic";
 const id = z.string().uuid();
 const network = z.enum(["youtube", "tiktok", "instagram", "threads", "twitter"]);
 const inputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("profile"), name: z.string().trim().min(1).max(80), description: z.string().max(300).default(""), color: z.string().regex(/^#[0-9a-f]{6}$/i) }),
-  z.object({ action: z.literal("connect"), profileId: id, platform: network }),
-  z.object({ action: z.literal("sync") }),
-  z.object({ action: z.literal("cancelConnection"), channelId: id }),
+  z.object({ action: z.literal("renameProfile"), profileId: id, name: z.string().trim().min(1).max(80) }),
+  z.object({ action: z.literal("importAccounts"), profileId: id, remoteProfileId: z.string().min(1).max(200).optional(), accountIds: z.array(z.string().min(1).max(200)).max(2).optional() }),
+  z.object({ action: z.literal("sync"), profileId: id.optional() }),
   z.object({ action: z.literal("draft"), id: id.optional(), profileId: id, title: z.string().trim().min(1).max(100), content: z.string().max(5000), mediaId: id.nullable(), platforms: z.array(network).max(2) }),
   z.object({ action: z.literal("schedule"), id, scheduledFor: z.string() }),
   z.object({ action: z.literal("deleteDraft"), id }),
 ]);
 const now = () => new Date().toISOString();
+function providerResult<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value);
+  if (!result.success) throw new ProviderError('Zernio вернул некорректный ответ. Проверьте статус перед повтором.', 503);
+  return result.data;
+}
 function json(data: unknown, status = 200) { return Response.json(data, { status, headers: { "Cache-Control": "no-store" } }); }
 async function ownedProfile(owner: string, profileId: string) {
   const [p] = await getDb().select().from(profiles).where(and(eq(profiles.owner, owner), eq(profiles.id, profileId)));
   if (!p) throw new Error("Профиль не найден.");
   return p;
 }
-async function syncChannels(owner: string) {
+async function syncProfile(owner: string, p: typeof profiles.$inferSelect) {
   const db = getDb();
-  const ps = await db.select().from(profiles).where(eq(profiles.owner, owner));
-  for (const p of ps) {
-    if (!p.zernioId) continue;
-    const data = await zernio(`/accounts?profileId=${encodeURIComponent(p.zernioId)}`);
-    const list = Array.isArray(data.accounts) ? data.accounts : [];
-    const slots = await db.select().from(channels).where(eq(channels.profileId, p.id));
-    for (const c of slots) {
-      const a = c.accountId ? list.find((a: any) => a._id === c.accountId) : list.find((a: any) => a.platform === c.platform);
-      if (a) await db.update(channels).set({ accountId: a._id, username: a.username || a.displayName || c.platform, state: a.isActive === false ? "disconnected" : "connected" }).where(eq(channels.id, c.id));
-      else if (c.accountId) await db.update(channels).set({ state: "disconnected" }).where(eq(channels.id, c.id));
-    }
+  const zernio = await createZernioClient(owner, p.id);
+  const imported = await importSocialAccounts(owner, p.id);
+  if (imported.status !== 'ready') throw new Error('Откройте карточку профиля и выберите соцсети из Zernio.');
+  const pending = await db.select().from(posts).where(and(eq(posts.owner, owner), eq(posts.profileId, p.id), inArray(posts.status, ['scheduled', 'processing', 'partial'])));
+  for (const post of pending) {
+    if (!post.zernioId) continue;
+    const data = providerResult(z.object({ post: z.object({ status: z.string(), platforms: z.array(z.object({ platform: z.string(), error: z.unknown().optional() })).optional() }) }), await zernio(`/posts/${encodeURIComponent(post.zernioId)}`));
+    const remote = data.post;
+    if (!remote) continue;
+    const status = ['published', 'scheduled', 'failed', 'partial', 'processing'].includes(remote.status) ? remote.status : 'processing';
+    const errors = (remote.platforms || []).filter(entry => entry.error).map(entry => `${entry.platform}: ${typeof entry.error === 'string' ? entry.error : 'Ошибка публикации'}`).join('; ');
+    await db.update(posts).set({ status, error: errors || null }).where(and(eq(posts.id, post.id), inArray(posts.status, ['scheduled', 'processing', 'partial'])));
   }
 }
 export async function GET() {
@@ -46,12 +55,15 @@ export async function GET() {
   if (!user) return json({ error: "Войдите в аккаунт." }, 401);
   const db = getDb();
   const ps = await db.select().from(profiles).where(eq(profiles.owner, user.userId)).orderBy(desc(profiles.createdAt));
-  const [cs, ms, ts] = await Promise.all([
+  const [cs, ms, ts, keys, mail] = await Promise.all([
     ps.length ? db.select().from(channels).where(inArray(channels.profileId, ps.map(p => p.id))) : [],
     db.select({ id: media.id, name: media.name, type: media.type, size: media.size, createdAt: media.createdAt }).from(media).where(eq(media.owner, user.userId)).orderBy(desc(media.createdAt)),
     db.select({ id: posts.id, profileId: posts.profileId, title: posts.title, content: posts.content, mediaId: posts.mediaId, platforms: posts.platforms, status: posts.status, scheduledFor: posts.scheduledFor, error: posts.error, createdAt: posts.createdAt }).from(posts).where(eq(posts.owner, user.userId)).orderBy(desc(posts.createdAt)),
+    db.select({ profileId: profileIntegrations.profileId }).from(profileIntegrations).where(eq(profileIntegrations.owner, user.userId)),
+    readMailSettings(user.userId),
   ]);
-  return json({ profiles: ps.map(({ owner, zernioId, ...p }) => p), channels: cs, media: ms, posts: ts, configured: isConfigured() });
+  const configuredIds = new Set(keys.map(key => key.profileId));
+  return json({ profiles: ps.map(({ owner, zernioId, accountSelection, ...p }) => ({ ...p, configured: configuredIds.has(p.id) })), channels: cs, media: ms, posts: ts, canSaveKey: canSaveIntegrationKey(), mail });
 }
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -66,56 +78,24 @@ export async function POST(request: Request) {
       return json({ id: profile.id });
     }
     if (input.action === "sync") {
-      await zernio("/profiles?limit=1");
-      await syncChannels(owner);
-      const pending = await db.select().from(posts).where(and(eq(posts.owner, owner), inArray(posts.status, ["scheduled", "processing", "partial"])));
-      for (const post of pending) {
-        if (!post.zernioId) continue;
-        const data = await zernio(`/posts/${encodeURIComponent(post.zernioId)}`);
-        const remote = data.post;
-        if (!remote) continue;
-        const status = ["published", "scheduled", "failed", "partial", "processing"].includes(remote.status) ? remote.status : "processing";
-        const errors = (remote.platforms || []).filter((p: any) => p.error).map((p: any) => `${p.platform}: ${typeof p.error === "string" ? p.error : "Ошибка публикации"}`).join("; ");
-        await db.update(posts).set({ status, error: errors || null }).where(eq(posts.id, post.id));
+      const ps = input.profileId ? [await ownedProfile(owner, input.profileId)] : await db.select().from(profiles).where(eq(profiles.owner, owner));
+      const keys = await db.select({ profileId: profileIntegrations.profileId }).from(profileIntegrations).where(eq(profileIntegrations.owner, owner));
+      const configuredIds = new Set(keys.map(key => key.profileId));
+      const failures: string[] = [];
+      for (const p of ps) {
+        if (!configuredIds.has(p.id) && !input.profileId) continue;
+        try { await syncProfile(owner, p); }
+        catch (error) { failures.push(`${p.name}: ${error instanceof Error ? error.message : 'Ошибка подключения'}`); }
       }
+      if (failures.length) throw new Error(`Не удалось обновить: ${failures.join('; ')}. Остальные профили обработаны.`);
       return json({ ok: true });
     }
-    if (input.action === "connect") {
-      if (!isConfigured()) throw new ProviderError("Сначала настройте ключ Zernio в разделе «Настройки».", 503);
-      const p = await ownedProfile(owner, input.profileId);
-      if (!p.zernioId) {
-        const found = await zernio(`/profiles?externalId=${encodeURIComponent(p.id)}`);
-        const remote = found.profiles?.[0] || (await zernio("/profiles", { method: "POST", body: JSON.stringify({ name: `${p.name} · ${p.id.slice(0,8)}`, externalId: p.id, color: p.color, timezone: "Asia/Qyzylorda" }) }, `profile-${p.id}`)).profile;
-        if (!remote?._id) throw new Error("Zernio не вернул идентификатор профиля.");
-        p.zernioId = remote._id;
-        await db.update(profiles).set({ zernioId: p.zernioId }).where(eq(profiles.id, p.id));
-      }
-      const existing = await db.select().from(channels).where(eq(channels.profileId, p.id));
-      let channel = existing.find(c => c.platform === input.platform);
-      if (!channel) {
-        const slot = [0, 1].find(slot => !existing.some(c => c.slot === slot));
-        if (slot === undefined) throw new Error("У профиля уже заняты оба слота соцсетей.");
-        channel = { id: crypto.randomUUID(), profileId: p.id, slot, platform: input.platform, accountId: null, username: null, state: "pending", createdAt: now() };
-        await db.insert(channels).values(channel);
-      }
-      const query = new URLSearchParams({ profileId: p.zernioId!, redirect_url: `${new URL(request.url).origin}/?oauth=1` });
-      if (channel.accountId) query.set("reconnectAccountId", channel.accountId);
-      const data = await zernio(`/connect/${input.platform}?${query}`);
-      if (!data.authUrl || new URL(data.authUrl).protocol !== "https:") throw new Error("Не удалось получить ссылку авторизации.");
-      return json({ authUrl: data.authUrl });
-    }
-    if (input.action === "cancelConnection") {
-      const [c] = await db.select().from(channels).where(eq(channels.id, input.channelId));
-      if (!c) throw new Error("Подключение не найдено.");
-      const p = await ownedProfile(owner, c.profileId);
-      if (c.accountId) throw new Error("Можно отменить только незавершённое подключение.");
-      if (p.zernioId) {
-        const data = await zernio(`/accounts?profileId=${encodeURIComponent(p.zernioId)}`);
-        if (data.accounts?.some((a: any) => a.platform === c.platform)) throw new Error("Соцсеть уже авторизована. Нажмите «Обновить статусы».");
-      }
-      await db.delete(channels).where(eq(channels.id, c.id));
+    if (input.action === "renameProfile") {
+      const changed = await db.update(profiles).set({ name: input.name }).where(and(eq(profiles.id, input.profileId), eq(profiles.owner, owner))).returning({ id: profiles.id });
+      if (!changed.length) throw new Error('Профиль не найден.');
       return json({ ok: true });
     }
+    if (input.action === "importAccounts") return json(await importSocialAccounts(owner, input.profileId, input));
     if (input.action === "draft") {
       await ownedProfile(owner, input.profileId);
       if (input.mediaId) {
@@ -139,7 +119,13 @@ export async function POST(request: Request) {
       if (!deleted.length) throw new Error("Удалить можно только черновик.");
       return json({ ok: true });
     }
-    if (!isConfigured()) throw new ProviderError("Для публикации настройте Zernio.", 503);
+    await ownedProfile(owner, post.profileId);
+    const [credential] = await db.select({ fingerprint: profileIntegrations.fingerprint }).from(profileIntegrations).where(and(eq(profileIntegrations.owner, owner), eq(profileIntegrations.profileId, post.profileId)));
+    if (post.status === 'draft') {
+      const imported = await importSocialAccounts(owner, post.profileId);
+      if (imported.status !== 'ready') throw new Error('Выберите соцсети из Zernio в карточке профиля перед публикацией.');
+    }
+    const zernio = await createZernioClient(owner, post.profileId);
     if (!["draft", "uncertain"].includes(post.status)) throw new Error("Публикация уже отправлена или обрабатывается.");
     let payload: Record<string, unknown>;
     if (post.status === "uncertain") {
@@ -157,7 +143,7 @@ export async function POST(request: Request) {
       if (m) {
         const object = await env.BUCKET!.get(m.key);
         if (!object) throw new Error("Файл отсутствует в хранилище.");
-        const signed = await zernio("/media/presign", { method: "POST", body: JSON.stringify({ filename: m.name, contentType: m.type, size: m.size }) });
+        const signed = providerResult(z.object({ uploadUrl:z.string().url(), publicUrl:z.string().url() }), await zernio("/media/presign", { method: "POST", body: JSON.stringify({ filename: m.name, contentType: m.type, size: m.size }) }));
         if (new URL(signed.uploadUrl).protocol !== "https:" || new URL(signed.publicUrl).protocol !== "https:") throw new Error("Некорректный адрес загрузки Zernio.");
         const upload = await fetch(signed.uploadUrl, { method: "PUT", headers: { "Content-Type": m.type, "Content-Length": String(m.size) }, body: object.body, signal: AbortSignal.timeout(120000) });
         if (!upload.ok) throw new Error("Не удалось передать файл в Zernio. Черновик сохранён.");
@@ -165,10 +151,10 @@ export async function POST(request: Request) {
       }
       payload = { title: post.title, content: post.content, mediaItems, scheduledFor, timezone: "Asia/Qyzylorda", platforms: targets.map(platform => ({ platform, accountId: connected.find(c => c.platform === platform)!.accountId, ...(platform === "youtube" ? { platformSpecificData: { title: post.title, visibility: "public" } } : {}) })) };
     }
-    const lock = await db.update(posts).set({ status: "sending", payload: JSON.stringify(payload), scheduledFor: String(payload.scheduledFor), error: null }).where(and(eq(posts.id, post.id), eq(posts.status, post.status))).returning({ id: posts.id });
-    if (!lock.length) throw new Error("Публикация уже отправляется в другой вкладке.");
+    const lock = await db.update(posts).set({ status: "sending", payload: JSON.stringify(payload), scheduledFor: String(payload.scheduledFor), error: null }).where(and(eq(posts.id, post.id), eq(posts.status, post.status), sql`exists (select 1 from profile_integrations where profileId = ${post.profileId} and fingerprint = ${credential?.fingerprint || ''})`)).returning({ id: posts.id });
+    if (!lock.length) throw new Error("Публикация уже отправляется или ключ профиля изменён. Обновите страницу.");
     try {
-      const data = await zernio("/posts", { method: "POST", body: JSON.stringify(payload) }, `post-${post.id}`);
+      const data = providerResult(z.object({post:z.object({_id:z.string().min(1)})}), await zernio("/posts", { method: "POST", body: JSON.stringify(payload) }, `post-${post.id}`));
       if (!data.post?._id) throw new Error("Zernio не вернул ID публикации. Проверьте статус перед повтором.");
       await db.update(posts).set({ status: "scheduled", zernioId: data.post._id, error: null }).where(eq(posts.id, post.id));
       return json({ ok: true });

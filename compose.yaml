@@ -1,0 +1,23 @@
+name: ferma
+services:
+  app:
+    build: .
+    image: ferma:local
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3100:3100"
+    env_file:
+      - path: ./docker.env
+        required: false
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ["CMD", "node", "docker/healthcheck.mjs"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    stop_grace_period: 30s
+volumes:
+  data:
