@@ -1,0 +1,9 @@
+{
+  "name": "ferma-reels",
+  "private": true,
+  "type": "module",
+  "description": "Procedural physics-simulation reels for FERMA trial reels",
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.80"
+  }
+}

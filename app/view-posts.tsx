@@ -1,9 +1,10 @@
 "use client";
 import { useState } from 'react';
-import { ExternalLink, FileText, Image as ImageIcon, Loader2, Pencil, Plus, RefreshCw, Trash2, Video, X } from 'lucide-react';
+import { AlertCircle, ExternalLink, FileText, Image as ImageIcon, Loader2, Pencil, Plus, RefreshCw, Trash2, Video, X } from 'lucide-react';
 import { requestJson } from '@/lib/client-api';
+import { MAX_UPLOAD, missingNetworks, validateTargets } from '@/lib/domain';
 import type { ProfileQueue, RemotePost } from '@/lib/zernio-insights';
-import { Empty, formatDate, Network, problemStatuses, Segmented, StatusPill, useZernio, type Ctx, type Post, type Profile } from './shared';
+import { connectedNetworks, Empty, formatDate, Modal, Network, networkName, problemStatuses, Segmented, StatusPill, useZernio, type Ctx, type Post, type Profile } from './shared';
 
 type Row = { key: string; profile: Profile | undefined; title: string; text: string; status: string; at: string | null; queued: boolean; media: string | null; platforms: string[]; links: { platform: string; url: string }[]; error: string | null; local: Post | null };
 type Filter = 'all' | 'draft' | 'scheduled' | 'published' | 'problem';
@@ -72,6 +73,71 @@ export function PostsPanel({ ctx, profiles, limit }: { ctx: Ctx; profiles: Profi
     : !loading && <Empty title={all.length ? 'Ничего не найдено' : 'Публикаций пока нет'} text={all.length ? 'Измените статус или поиск.' : 'Создайте первую публикацию.'} action={!all.length && <button className="primary" onClick={() => ctx.compose(single ? profiles[0].id : undefined)}><Plus size={16} />Новая публикация</button>} />}
     {(hidden || (limit && rows.length > limit)) && <p className="muted small-note">Показаны последние публикации. Самые старые смотрите в кабинете Zernio.</p>}
   </div>;
+}
+
+type BulkItem = { name: string; state: 'waiting' | 'working' | 'queued' | 'draft' | 'failed'; error?: string };
+const BULK_STATES: Record<BulkItem['state'], string> = { waiting: 'В очереди на загрузку', working: 'Загружается…', queued: 'В очереди публикаций', draft: 'Сохранён черновиком', failed: 'Ошибка' };
+const FILE_TYPES = ['video/mp4', 'video/quicktime', 'image/jpeg', 'image/png', 'image/webp'];
+
+/** One file becomes one post for every connected network of the profile, in the queue's next free slots. */
+export function BulkModal({ ctx, initialProfile, close }: { ctx: Ctx; initialProfile?: string; close: () => void }) {
+  const [profileId, setProfileId] = useState(initialProfile || ctx.state.profiles[0]?.id || '');
+  const [files, setFiles] = useState<File[]>([]);
+  const [caption, setCaption] = useState('');
+  const [items, setItems] = useState<BulkItem[]>([]);
+  const [running, setRunning] = useState(false);
+  const profile = ctx.state.profiles.find(item => item.id === profileId);
+  const queue = useZernio<ProfileQueue>(profile?.configured ? [profile] : [], 'view=queue')[profileId]?.data;
+  const queueReady = Boolean(queue?.exists && queue.active && queue.nextSlots.length);
+  const targets = connectedNetworks(profileId, ctx.state);
+  const missing = missingNetworks(targets);
+  const finished = items.length > 0 && !running;
+  let issue = '';
+  const tooBig = files.find(file => file.size > MAX_UPLOAD || !FILE_TYPES.includes(file.type));
+  if (tooBig) issue = `${tooBig.name}: нужен MP4, MOV, JPG, PNG или WebP до 90 МБ.`;
+  else if (!targets.length) issue = 'Сначала подключите соцсети в профиле.';
+  else {
+    try { for (const file of files) validateTargets(targets, caption, file.type.startsWith('video/') ? 'video' : 'image'); }
+    catch (failure) { issue = failure instanceof Error ? failure.message : 'Проверьте подпись.'; }
+  }
+  async function start() {
+    setRunning(true);
+    setItems(files.map(file => ({ name: file.name, state: 'waiting' })));
+    const mark = (index: number, change: Partial<BulkItem>) => setItems(current => current.map((item, position) => position === index ? { ...item, ...change } : item));
+    const post = (body: unknown) => requestJson<{ id: string }>('/api/workspace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    for (const [index, file] of files.entries()) {
+      mark(index, { state: 'working' });
+      try {
+        const media = await requestJson<{ id: string }>('/api/media', { method: 'POST', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+        const title = file.name.replace(/\.[^.]+$/, '').slice(0, 100) || 'Публикация';
+        const draft = await post({ action: 'draft', profileId, title, content: caption, mediaId: media.id, platforms: targets });
+        if (queueReady) { await post({ action: 'schedule', id: draft.id, queue: true }); mark(index, { state: 'queued' }); }
+        else mark(index, { state: 'draft' });
+      } catch (failure) { mark(index, { state: 'failed', error: failure instanceof Error ? failure.message : 'Ошибка' }); }
+    }
+    await ctx.reload().catch(() => undefined);
+    setRunning(false);
+  }
+  return <Modal title="Пачку в очередь" close={() => !running && close()}>
+    <div className="form-body">
+      <label>Профиль<select value={profileId} disabled={running || finished} onChange={event => setProfileId(event.target.value)}>{ctx.state.profiles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
+      <p className="muted">Публикуется в: {targets.length ? <span className="networks">{targets.map(item => <Network key={item} platform={item} />)}</span> : 'ничего не подключено'}{missing.length > 0 && targets.length > 0 && ` (не подключено: ${missing.map(networkName).join(', ')})`}</p>
+      {!finished && <>
+        <label>Файлы<input type="file" multiple accept={FILE_TYPES.join(',')} disabled={running} onChange={event => setFiles(Array.from(event.target.files || []))} /></label>
+        <label>Подпись ко всем файлам<textarea rows={4} maxLength={5000} value={caption} disabled={running} onChange={event => setCaption(event.target.value)} placeholder="Текст для Instagram и Threads" /></label>
+        {profile?.configured && !queueReady && <p className="notice-bad"><AlertCircle size={15} /><span>Автопубликация не настроена, файлы сохранятся черновиками.</span><button type="button" className="link" onClick={() => { close(); ctx.go(`profile/${profileId}/queue`); }}>Настроить</button></p>}
+        {queueReady && <p className="muted">Первый файл выйдет {formatDate(queue!.nextSlots[0])}, остальные в следующие свободные слоты.</p>}
+        {files.length > 0 && issue && <p className="error-text" role="alert">{issue}</p>}
+      </>}
+      {items.length > 0 && <ul className="plain-list bulk-list">{items.map(item => <li key={item.name}><span className="post-text"><strong>{item.name}</strong>{item.error && <small className="error-text">{item.error}</small>}</span><span className={`pill ${item.state === 'failed' ? 'bad' : item.state === 'queued' ? 'good' : 'plain'}`}>{BULK_STATES[item.state]}</span></li>)}</ul>}
+    </div>
+    <div className="modal-footer">
+      {finished ? <button className="primary" onClick={close}>Готово</button> : <>
+        <button className="ghost" disabled={running} onClick={close}>Отмена</button>
+        <button className="primary" disabled={running || !files.length || Boolean(issue)} onClick={() => void start()}>{running && <Loader2 size={15} className="spin" />}{running ? 'Загружаем…' : queueReady ? `В очередь: ${files.length}` : `В черновики: ${files.length}`}</button>
+      </>}
+    </div>
+  </Modal>;
 }
 
 const slotsText = (queue: ProfileQueue) => DAYS.flatMap(day => {

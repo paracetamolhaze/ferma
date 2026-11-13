@@ -51,7 +51,7 @@ test('imports existing Zernio accounts without OAuth or remote writes and reconc
   remoteAccounts = [{ _id:'yt', platform:'youtube', username:'renamed-channel', profileId:'remote-a', isActive:false }];
   await call({});
   assert.equal((await channels()).length, 1);
-  assert.equal((await channels())[0].state, 'disconnected');
+  assert.equal((await channels())[0].state, 'inactive');
   assert.equal((await channels())[0].username, 'renamed-channel');
   malformed = true;
   assert.equal((await call({})).httpStatus, 400);

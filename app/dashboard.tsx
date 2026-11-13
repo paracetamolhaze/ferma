@@ -2,24 +2,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertCircle, BarChart3, CalendarDays, Check, FolderOpen, LayoutDashboard, ListOrdered, Loader2, Mail, Plus, RefreshCw, Settings2, UploadCloud, Users, Video, X } from 'lucide-react';
 import { requestJson } from '@/lib/client-api';
-import { MAX_UPLOAD, NETWORKS, validateTargets } from '@/lib/domain';
+import { MAX_UPLOAD, missingNetworks, NETWORKS, validateTargets } from '@/lib/domain';
 import type { ProfileQueue, RemotePost } from '@/lib/zernio-insights';
 import AddProfile from './add-profile';
 import MailSettingsForm from './mail-settings-form';
-import { Avatar, Empty, formatDate, initialState, Modal, needsSetup, Network, problemStatuses, useZernio, type Ctx, type Media, type Post, type State } from './shared';
-import { PostsPanel, QueueOverview } from './view-posts';
-import { MailRows, ProfilePage, ProfilesView, useRecentMail } from './view-profiles';
+import { Avatar, connectedNetworks, Empty, formatDate, initialState, Modal, needsSetup, Network, networkName, problemStatuses, useZernio, type Ctx, type Media, type Post, type State } from './shared';
+import { BulkModal, PostsPanel, QueueOverview } from './view-posts';
+import { CodeRows, ProfilePage, ProfilesView, useRecentCodes } from './view-profiles';
+import { SmsSettings, UnmatchedSms } from './sms-panels';
+import { FivesimSettings } from './access-panels';
 import { StatsPanel } from './view-stats';
 
 const NAV = [
   { id: 'overview', icon: LayoutDashboard, text: 'Обзор' },
   { id: 'profiles', icon: Users, text: 'Профили' },
-  { id: 'mail', icon: Mail, text: 'Почта и коды' },
+  { id: 'mail', icon: Mail, text: 'Почта, СМС и коды' },
   { id: 'posts', icon: CalendarDays, text: 'Публикации' },
   { id: 'stats', icon: BarChart3, text: 'Статистика' },
   { id: 'library', icon: FolderOpen, text: 'Медиатека' },
 ];
-const TITLES: Record<string, string> = { overview: 'Обзор', profiles: 'Профили', mail: 'Почта и коды', posts: 'Публикации', stats: 'Статистика', library: 'Медиатека', settings: 'Настройки' };
+const TITLES: Record<string, string> = { overview: 'Обзор', profiles: 'Профили', mail: 'Почта, СМС и коды', posts: 'Публикации', stats: 'Статистика', library: 'Медиатека', settings: 'Настройки' };
 const sizeText = (size: number) => size < 1024 ? `${size} Б` : size < 1048576 ? `${(size / 1024).toFixed(1)} КБ` : `${(size / 1048576).toFixed(1)} МБ`;
 
 function Overview({ ctx }: { ctx: Ctx }) {
@@ -27,7 +29,7 @@ function Overview({ ctx }: { ctx: Ctx }) {
   const withKey = state.profiles.filter(profile => profile.configured);
   const scheduled = useZernio<{ posts: RemotePost[]; total: number }>(withKey, 'view=posts&status=scheduled');
   const failed = useZernio<{ posts: RemotePost[]; total: number }>(withKey, 'view=posts&status=failed');
-  const mail = useRecentMail(Boolean(state.mail));
+  const codes = useRecentCodes(state);
   const upcoming = Object.entries(scheduled).flatMap(([id, item]) => (item.data?.posts || []).map(post => ({ ...post, profileId: id }))).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
   const loadingScheduled = Object.values(scheduled).some(item => item.loading);
   const remoteProblems = Object.values(failed).reduce((total, item) => total + (item.data?.total || 0), 0);
@@ -46,11 +48,11 @@ function Overview({ ctx }: { ctx: Ctx }) {
     <div className="tiles">{tiles.map(tile => <button className="tile" key={tile.label} onClick={() => ctx.go(tile.go)}><span>{tile.label}</span><strong>{tile.value}</strong><small>{tile.note}</small></button>)}</div>
     <div className="columns">
       <section className="panel">
-        <header className="panel-head"><h2>Свежие коды</h2><button className="link" onClick={() => ctx.go('mail')}>Вся почта</button></header>
-        {!state.mail ? <div className="panel-body"><p className="muted">Почта не подключена. <button className="link" onClick={() => ctx.go('settings')}>Подключить</button></p></div>
-          : mail.error ? <div className="panel-body"><p className="error-text" role="alert">{mail.error}</p></div>
-          : mail.emails?.length ? <MailRows ctx={ctx} emails={mail.emails.slice(0, 6)} profiles={state.profiles} compact />
-          : <div className="panel-body"><p className="muted">{mail.emails ? 'Писем пока нет.' : 'Загружаем…'}</p></div>}
+        <header className="panel-head"><h2>Свежие коды</h2><button className="link" onClick={() => ctx.go('mail')}>Все письма и СМС</button></header>
+        {!state.mail && !state.sms ? <div className="panel-body"><p className="muted">Почта и СМС не подключены. <button className="link" onClick={() => ctx.go('settings')}>Подключить</button></p></div>
+          : codes.error ? <div className="panel-body"><p className="error-text" role="alert">{codes.error}</p></div>
+          : codes.rows.length ? <CodeRows ctx={ctx} rows={codes.rows.slice(0, 6)} profiles={state.profiles} compact />
+          : <div className="panel-body"><p className="muted">{codes.ready ? 'Сообщений пока нет.' : 'Загружаем…'}</p></div>}
       </section>
       <section className="panel">
         <header className="panel-head"><h2>Ближайшие публикации</h2><button className="link" onClick={() => ctx.go('posts')}>Все</button></header>
@@ -67,7 +69,7 @@ function Overview({ ctx }: { ctx: Ctx }) {
     {setup.length > 0 && <section className="panel">
       <header className="panel-head"><h2>Нужно настроить</h2></header>
       <ul className="plain-list">{setup.map(profile => {
-        const missing = [!profile.configured && 'ключ Zernio', !state.channels.some(channel => channel.profileId === profile.id && channel.state === 'connected') && 'соцсеть', state.mail && !profile.emailLocal && 'адрес почты'].filter(Boolean).join(', ');
+        const missing = [!profile.configured && 'ключ Zernio', ...missingNetworks(connectedNetworks(profile.id, state)).map(networkName), state.mail && !profile.emailLocal && 'адрес почты'].filter(Boolean).join(', ');
         return <li key={profile.id} className="clickable" onClick={() => ctx.go(`profile/${profile.id}/settings`)}><span className="who"><Avatar profile={profile} /><strong>{profile.name}</strong></span><span className="muted">нет: {missing}</span></li>;
       })}</ul>
     </section>}
@@ -76,19 +78,20 @@ function Overview({ ctx }: { ctx: Ctx }) {
 
 function MailView({ ctx }: { ctx: Ctx }) {
   const { state } = ctx;
-  const { emails, error, loading, refresh } = useRecentMail(Boolean(state.mail));
+  const { rows: all, ready, error, loading, refresh, smsMessages } = useRecentCodes(state);
   const [onlyCodes, setOnlyCodes] = useState(false);
-  if (!state.mail) return <Empty title="Почта не подключена" text="Подключите MailClaw в настройках, и у профилей появятся свои адреса." action={<button className="primary" onClick={() => ctx.go('settings')}>Открыть настройки</button>} />;
-  const rows = (emails || []).filter(email => !onlyCodes || email.code);
+  if (!state.mail && !state.sms) return <Empty title="Почта и СМС не подключены" text="Подключите их в настройках." action={<button className="primary" onClick={() => ctx.go('settings')}>Открыть настройки</button>} />;
+  const rows = all.filter(row => !onlyCodes || row.code);
   const withoutAddress = state.profiles.filter(profile => !profile.emailLocal);
   return <div className="stack">
     <div className="toolbar">
-      <label className="switch"><input type="checkbox" checked={onlyCodes} onChange={event => setOnlyCodes(event.target.checked)} />Только письма с кодом</label>
+      <label className="switch"><input type="checkbox" checked={onlyCodes} onChange={event => setOnlyCodes(event.target.checked)} />Только с кодом</label>
       <span className="toolbar-note">Обновляется само каждые 15 секунд</span>
-      <button className="ghost" disabled={loading} onClick={() => void refresh()}>{loading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}Обновить</button>
+      <button className="ghost" disabled={loading} onClick={refresh}>{loading ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}Обновить</button>
     </div>
     {error && <p className="notice-bad" role="alert">{error}</p>}
-    {rows.length ? <section className="panel"><MailRows ctx={ctx} emails={rows} profiles={state.profiles} /></section> : !error && <Empty title={emails ? 'Писем пока нет' : 'Загружаем…'} text={emails ? 'Новые письма на адреса профилей появятся здесь.' : undefined} />}
+    <UnmatchedSms ctx={ctx} messages={smsMessages} onBound={refresh} />
+    {rows.length ? <section className="panel"><CodeRows ctx={ctx} rows={rows} profiles={state.profiles} /></section> : !error && <Empty title={ready ? 'Сообщений пока нет' : 'Загружаем…'} text={ready ? 'Новые письма и СМС профилей появятся здесь.' : undefined} />}
     {withoutAddress.length > 0 && <p className="muted">Нет адреса: {withoutAddress.map(profile => <button className="link spaced" key={profile.id} onClick={() => ctx.go(`profile/${profile.id}`)}>{profile.name}</button>)}</p>}
   </div>;
 }
@@ -116,6 +119,8 @@ function Settings({ ctx }: { ctx: Ctx }) {
       <header className="panel-head"><h2>Почта (MailClaw)</h2><span className={`pill ${state.mail ? 'good' : 'plain'}`}>{state.mail ? 'Подключена' : 'Не подключена'}</span></header>
       <div className="panel-body"><MailSettingsForm key={state.mail ? `${state.mail.baseUrl} ${state.mail.domain}` : 'new'} mail={state.mail} canSave={state.canSaveKey} onSaved={ctx.reload} /></div>
     </section>
+    <SmsSettings ctx={ctx} />
+    <FivesimSettings ctx={ctx} />
     <section className="panel">
       <header className="panel-head"><h2>Ключи Zernio</h2><a className="link" href="https://zernio.com" target="_blank" rel="noreferrer">Кабинет Zernio</a></header>
       {state.profiles.length ? <ul className="plain-list">{state.profiles.map(profile => <li key={profile.id} className="clickable" onClick={() => ctx.go(`profile/${profile.id}/settings`)}>
@@ -134,6 +139,7 @@ export default function Home() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [adding, setAdding] = useState(false);
+  const [bulk, setBulk] = useState<{ profileId?: string } | null>(null);
   const [editor, setEditor] = useState<Partial<Post> | null>(null);
   const [schedule, setSchedule] = useState<Post | null>(null);
   const [scheduleMode, setScheduleMode] = useState<'time' | 'queue'>('time');
@@ -185,7 +191,9 @@ export default function Home() {
   function compose(profileId?: string, mediaId?: string) {
     setError('');
     if (!state.profiles.length) { setAdding(true); return; }
-    setEditor({ profileId: profileId || state.profiles[0].id, mediaId: mediaId || null, title: '', content: '', platforms: '[]' });
+    const target = profileId || state.profiles[0].id;
+    // A profile is run on all its networks at once; unticking stays possible for a single post.
+    setEditor({ profileId: target, mediaId: mediaId || null, title: '', content: '', platforms: JSON.stringify(connectedNetworks(target, state)) });
   }
   function plan(item: Post) {
     setError('');
@@ -235,13 +243,14 @@ export default function Home() {
     state, busy, reload, go, compose,
     edit: item => { setError(''); setEditor(item); },
     plan, remove: setDeleting, addProfile: () => { setError(''); setAdding(true); }, notify: setNotice,
+    bulk: profileId => { setError(''); if (state.profiles.length) setBulk({ profileId }); else setAdding(true); },
   };
   const [section, routeId, routeTab] = route.split('/');
   const onProfile = section === 'profile';
   const activeNav = onProfile ? 'profiles' : section;
   const withKey = state.profiles.filter(profile => profile.configured);
   const headerAction = section === 'profiles' ? <button className="primary" onClick={ctx.addProfile}><Plus size={16} />Новый профиль</button>
-    : section === 'posts' ? <button className="primary" onClick={() => compose()}><Plus size={16} />Новая публикация</button>
+    : section === 'posts' ? <div className="panel-actions"><button className="ghost" onClick={() => ctx.bulk()}><UploadCloud size={16} />Пачку в очередь</button><button className="primary" onClick={() => compose()}><Plus size={16} />Новая публикация</button></div>
     : section === 'library' ? <button className="primary" disabled={uploadActive} onClick={() => fileRef.current?.click()}><UploadCloud size={16} />Загрузить файлы</button>
     : section === 'overview' ? <button className="ghost" disabled={busy || !withKey.length} onClick={() => run(async () => { await post({ action: 'sync' }); await reload(); setNotice('Соцсети и статусы обновлены.'); })}>{busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}Обновить из Zernio</button> : null;
   let scheduleIssue = '';
@@ -283,19 +292,23 @@ export default function Home() {
       </>}
     </main>
     {adding && <AddProfile ctx={ctx} close={() => setAdding(false)} />}
+    {bulk && <BulkModal ctx={ctx} initialProfile={bulk.profileId} close={() => setBulk(null)} />}
     {editor && <Modal title={editor.id ? 'Редактировать черновик' : 'Новая публикация'} close={() => !busy && !uploadActive && setEditor(null)} wide>
       <form onSubmit={event => {
         event.preventDefault();
+        const next = ((event.nativeEvent as SubmitEvent).submitter as HTMLElement | null)?.dataset.next;
         void run(async () => {
-          await post({ id: editor.id, profileId: editor.profileId, title: editor.title, content: editor.content, mediaId: editor.mediaId, action: 'draft', platforms: JSON.parse(editor.platforms || '[]') });
-          await reload();
+          const saved = await post({ id: editor.id, profileId: editor.profileId, title: editor.title, content: editor.content, mediaId: editor.mediaId, action: 'draft', platforms: JSON.parse(editor.platforms || '[]') });
+          const latest = await reload();
           setEditor(null);
-          setNotice('Черновик сохранён. Запланируйте его в разделе «Публикации».');
+          const draft = latest.posts.find(item => item.id === saved.id);
+          if (next === 'plan' && draft) plan(draft);
+          else setNotice('Черновик сохранён. Запланируйте его в разделе «Публикации».');
         });
       }}>
         <div className="form-body form-columns">
           <div className="form-stack">
-            <label>Профиль<select value={editor.profileId} onChange={event => setEditor({ ...editor, profileId: event.target.value, platforms: '[]' })}>{state.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+            <label>Профиль<select value={editor.profileId} onChange={event => setEditor({ ...editor, profileId: event.target.value, platforms: JSON.stringify(connectedNetworks(event.target.value, state)) })}>{state.profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
             <label>Название<input required maxLength={100} value={editor.title} onChange={event => setEditor({ ...editor, title: event.target.value })} placeholder="Название публикации или видео" /></label>
             <label>Подпись<textarea rows={6} maxLength={5000} value={editor.content} onChange={event => setEditor({ ...editor, content: event.target.value })} placeholder="Текст публикации" /></label>
             <small className="muted">{editor.content?.length || 0} символов</small>
@@ -312,7 +325,7 @@ export default function Home() {
           </div>
         </div>
         {error && <p className="error-text form-error" role="alert">{error}</p>}
-        <div className="modal-footer"><button type="button" className="ghost" disabled={busy || uploadActive} onClick={() => setEditor(null)}>Отмена</button><button className="primary" disabled={busy || uploadActive}>{busy && <Loader2 size={16} className="spin" />}Сохранить черновик</button></div>
+        <div className="modal-footer"><button type="button" className="ghost" disabled={busy || uploadActive} onClick={() => setEditor(null)}>Отмена</button><button className="ghost" disabled={busy || uploadActive}>Сохранить черновик</button><button className="primary" data-next="plan" disabled={busy || uploadActive}>{busy && <Loader2 size={16} className="spin" />}Далее: когда опубликовать</button></div>
       </form>
     </Modal>}
     {schedule && <Modal title="Запланировать публикацию" close={() => !busy && setSchedule(null)}>

@@ -69,6 +69,12 @@ docker compose up -d --build
 
 Отправитель должен писать адрес в нижнем регистре: MailClaw ищет получателя по точному совпадению.
 
+## СМС профиля
+
+Номер профиля: eSIM или SIM на имя владельца в Android-телефоне с приложением [SMS Gateway for Android](https://docs.sms-gate.app). Телефон подписывает каждую СМС и отправляет её на приёмник `sms-worker` на Cloudflare, откуда FERMA её читает.
+
+Приёмник развёрнут отдельно (`sms-worker/`, D1 `sms-inbox`). Сообщения хранятся 90 дней. Подключение телефона описано в **Настройках → СМС**. Логин и пароль приложения используются один раз и не сохраняются. Если Android не сообщает свой номер, СМС появится в блоке «СМС без профиля», и её SIM привязывается к профилю вручную.
+
 ## Локальный запуск без Docker
 Node.js 22.13+.
 
@@ -81,6 +87,7 @@ node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0003_remote_profile_isolation.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0004_imported_account_selection.sql
 node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0005_profile_mail.sql
+node --import ./scripts/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js d1 execute DB --local --config dist/server/wrangler.json --persist-to .wrangler/state --file drizzle/0006_profile_sms.sql
 npm run dev -- --host 127.0.0.1
 ```
 
@@ -120,5 +127,7 @@ npm run build
 - **Медиатека** и **Настройки**.
 
 Публикации и статистика читаются из Zernio ключом каждого профиля. Показываются последние 50 постов на профиль. Автопубликация использует очередь Zernio: профиль хранит слоты, а пост с пометкой «В очередь» выходит в ближайший свободный слот.
+
+Каждый профиль ведётся в Instagram и Threads одновременно: кнопки подключения есть на вкладке «Подключения», новая публикация сразу отмечает обе сети. «Пачку в очередь» создаёт из каждого файла отдельную публикацию и ставит их в следующие свободные слоты.
 
 Логотипы соцсетей: Simple Icons (CC0, лицензия в public/icons).

@@ -31,12 +31,21 @@ if (migrationCode !== 0) throw new Error(`Database migration failed (${migration
 
 const worker = spawn(process.execPath, [wrangler, 'dev', ...common, '--ip', '127.0.0.1', '--port', '8787', '--inspector-port', '0'], { env: childEnvironment, stdio: ['ignore', 'inherit', 'inherit'] });
 const gateway = createGateway();
+// The autopilot engine runs beside the app; it restarts by itself if it ever stops.
+let autopilot = null;
+function startAutopilot() {
+  if (stopping) return;
+  autopilot = spawn(process.execPath, ['/app/docker/autopilot.mjs'], { env: process.env, stdio: ['ignore', 'inherit', 'inherit'] });
+  autopilot.once('exit', () => { autopilot = null; setTimeout(startAutopilot, 10000); });
+}
+setTimeout(startAutopilot, 5000);
 gateway.listen(3100, '0.0.0.0', () => console.log('FERMA Docker: http://localhost:3100'));
 let stopping = false;
 function stop() {
   if (stopping) return;
   stopping = true;
   gateway.close();
+  autopilot?.kill('SIGTERM');
   worker.kill('SIGTERM');
   setTimeout(() => process.exit(1), 25000).unref();
 }

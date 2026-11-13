@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { isProfileReady } from '../lib/domain.ts';
+import { missingNetworks } from '../lib/domain.ts';
 import { mailDocument, MAIL_FRAME_SANDBOX } from '../lib/mail-document.ts';
 import { extractCode } from '../lib/mail-codes.ts';
 
@@ -27,10 +27,10 @@ test('finds login codes in the wording services actually use and ignores the res
   for (const [subject, text, expected] of cases) assert.equal(extractCode(subject, text), expected, `${subject} | ${text}`);
 });
 
-test('one connected network makes a profile ready', () => {
-  assert.equal(isProfileReady(0), false);
-  assert.equal(isProfileReady(1), true);
-  assert.equal(isProfileReady(2), true);
+test('a profile is complete only with both Instagram and Threads', () => {
+  assert.deepEqual(missingNetworks([]), ['instagram', 'threads']);
+  assert.deepEqual(missingNetworks(['threads']), ['instagram']);
+  assert.deepEqual(missingNetworks(['instagram', 'threads']), []);
 });
 
 test('mail HTML cannot run scripts, submit forms or load remote content', () => {

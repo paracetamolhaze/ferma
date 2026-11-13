@@ -56,7 +56,7 @@ export async function importSocialAccounts(owner: string, profileId: string, sel
   const previous = await db.select().from(channels).where(eq(channels.profileId, profileId));
   const values = chosen.map((account, slot) => ({
     id: previous.find(item => item.accountId === account._id)?.id || crypto.randomUUID(), profileId, slot, platform: account.platform,
-    accountId: account._id, username: account.username || account.displayName || account.platform, state: account.isActive === false ? 'disconnected' : 'connected', createdAt: new Date().toISOString(),
+    accountId: account._id, username: account.username || account.displayName || account.platform, state: account.isActive === false ? 'inactive' : 'connected', createdAt: new Date().toISOString(),
   }));
   // D1 batch is atomic: slot swaps and removals cannot leave a half-imported list.
   const bind = db.update(profiles).set({ zernioId: remoteId, accountSelection: selectedIds ? JSON.stringify(selectedIds) : null }).where(and(eq(profiles.id, profileId), eq(profiles.owner, owner)));

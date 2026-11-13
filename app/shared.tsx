@@ -1,16 +1,16 @@
 "use client";
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { Check, Copy, X } from 'lucide-react';
-import { NETWORKS } from '@/lib/domain';
+import { missingNetworks, NETWORKS } from '@/lib/domain';
 import { requestJson } from '@/lib/client-api';
 import { colorText } from '@/lib/profile-colors';
 
-export type Profile = { configured: boolean; id: string; name: string; description: string; color: string; emailLocal: string | null; createdAt: string };
+export type Profile = { configured: boolean; id: string; name: string; description: string; color: string; emailLocal: string | null; phone: string | null; smsLine: string | null; avatar: string | null; createdAt: string };
 export type Channel = { id: string; profileId: string; platform: string; username: string | null; state: string; accountId: string | null };
 export type Media = { id: string; name: string; type: string; size: number; createdAt: string };
 export type Post = { id: string; profileId: string; zernioId: string | null; title: string; content: string; mediaId: string | null; platforms: string; status: string; scheduledFor: string | null; error: string | null };
-export type State = { profiles: Profile[]; channels: Channel[]; media: Media[]; posts: Post[]; canSaveKey: boolean; mail: { baseUrl: string; domain: string } | null };
-export const initialState: State = { profiles: [], channels: [], media: [], posts: [], canSaveKey: false, mail: null };
+export type State = { profiles: Profile[]; channels: Channel[]; media: Media[]; posts: Post[]; canSaveKey: boolean; mail: { baseUrl: string; domain: string } | null; sms: { baseUrl: string; webhookUrl: string } | null; fivesim: boolean };
+export const initialState: State = { profiles: [], channels: [], media: [], posts: [], canSaveKey: false, mail: null, sms: null, fivesim: false };
 
 /** What every screen needs from the shell. */
 export type Ctx = {
@@ -23,6 +23,7 @@ export type Ctx = {
   plan: (post: Post) => void;
   remove: (post: Post) => void;
   addProfile: () => void;
+  bulk: (profileId?: string) => void;
   notify: (text: string) => void;
 };
 
@@ -45,7 +46,9 @@ export function Network({ platform, username }: { platform: string; username?: s
     {username && <span>@{username.replace(/^@/, '')}</span>}
   </span>;
 }
-export function Avatar({ profile, size }: { profile: Pick<Profile, 'name' | 'color'>; size?: 'large' }) {
+export const avatarUrl = (profile: Pick<Profile, 'id' | 'avatar'>) => `/api/avatar?profileId=${profile.id}&v=${profile.avatar}`;
+export function Avatar({ profile, size }: { profile: Pick<Profile, 'name' | 'color'> & Partial<Pick<Profile, 'id' | 'avatar'>>; size?: 'large' }) {
+  if (profile.id && profile.avatar) return <img className={`avatar ${size || ''}`} src={avatarUrl({ id: profile.id, avatar: profile.avatar })} alt="" />;
   return <span className={`avatar ${size || ''}`} style={{ background: profile.color, color: colorText(profile.color) }}>{profile.name.slice(0, 2).toUpperCase()}</span>;
 }
 export function StatusPill({ status }: { status: string }) {
@@ -108,5 +111,6 @@ export function useZernio<T>(profiles: Pick<Profile, 'id'>[], query: string, rev
   }, [ids, query, revision]);
   return results;
 }
+export const connectedNetworks = (profileId: string, state: State) => state.channels.filter(channel => channel.profileId === profileId && channel.state === 'connected').map(channel => channel.platform);
 export const needsSetup = (profile: Profile, state: State) =>
-  !profile.configured || !state.channels.some(channel => channel.profileId === profile.id && channel.state === 'connected') || (Boolean(state.mail) && !profile.emailLocal);
+  !profile.configured || missingNetworks(connectedNetworks(profile.id, state)).length > 0 || (Boolean(state.mail) && !profile.emailLocal);

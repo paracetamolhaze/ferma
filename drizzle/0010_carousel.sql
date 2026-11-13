@@ -1,0 +1,1 @@
+ALTER TABLE `autopilot_items` ADD `extraImages` integer DEFAULT 0 NOT NULL;

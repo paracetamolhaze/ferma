@@ -1,11 +1,16 @@
 "use client";
 import { useEffect, useState } from 'react';
-import { ExternalLink, Loader2, RefreshCw } from 'lucide-react';
-import { NETWORKS } from '@/lib/domain';
+import { ExternalLink, Loader2, Plus, RefreshCw } from 'lucide-react';
+import { NETWORKS, PROFILE_NETWORKS } from '@/lib/domain';
 import type { ImportResult } from '@/lib/social-import';
 import { requestJson } from '@/lib/client-api';
 
 type Channel = { id: string; platform: string; username: string | null; state: string };
+function openLogin(tab: Window | null, url: string) {
+  if (!tab) { window.location.assign(url); return; }
+  tab.opener = null;
+  tab.location.assign(url);
+}
 export default function ProfileSocialAccounts({ profileId, configured, revision, channels, onUpdated }: { profileId: string; configured: boolean; revision: number; channels: Channel[]; onUpdated: () => Promise<unknown> }) {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [busy, setBusy] = useState(false);
@@ -23,6 +28,26 @@ export default function ProfileSocialAccounts({ profileId, configured, revision,
     } catch (error) { if (!signal?.aborted) setError(error instanceof Error ? error.message : 'Не удалось загрузить соцсети.'); }
     finally { if (!signal?.aborted) setBusy(false); }
   }
+  const [waiting, setWaiting] = useState(false);
+  const connectedPlatforms = channels.filter(channel => channel.state === 'connected').map(channel => channel.platform);
+  async function connect(platform: string) {
+    setError('');
+    // Opened before the request so the browser treats it as the click's own window.
+    const tab = window.open('', '_blank');
+    try {
+      const { authUrl } = await requestJson<{ authUrl: string }>('/api/zernio', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profileId, connect: platform }) });
+      openLogin(tab, authUrl);
+      setWaiting(true);
+    } catch (failure) { tab?.close(); setError(failure instanceof Error ? failure.message : 'Не удалось начать подключение.'); }
+  }
+  useEffect(() => {
+    if (!waiting) return;
+    // Coming back from the login window is the moment the new account can be read.
+    const onFocus = () => { setWaiting(false); void sync(); };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waiting]);
   useEffect(() => {
     if (!configured) return;
     const controller = new AbortController();
@@ -35,8 +60,8 @@ export default function ProfileSocialAccounts({ profileId, configured, revision,
   }, [profileId, configured, revision]);
   return <section className="profile-social-section">
     <div className="section-title"><h3>Социальные сети</h3><span>{channels.length} / 2</span></div>
-    <p className="muted">Подключайте соцсети в Zernio — здесь они появятся автоматически.</p>
-    <div className="social-import-actions"><a href="https://zernio.com" target="_blank" rel="noreferrer" className="secondary"><ExternalLink size={15} />Открыть Zernio</a><button className="secondary" disabled={busy || !configured} onClick={() => void sync()}>{busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{busy ? 'Загружаем соцсети…' : 'Обновить соцсети'}</button></div>
+    <p className="muted">Откроется вход в соцсеть. После входа вернитесь сюда, и аккаунт появится сам.</p>
+    <div className="social-import-actions">{PROFILE_NETWORKS.filter(platform => !connectedPlatforms.includes(platform)).map(platform => <button key={platform} className="primary" disabled={busy || !configured} onClick={() => void connect(platform)}><Plus size={15} />Подключить {NETWORKS.find(network => network.id === platform)?.name}</button>)}<a href="https://zernio.com" target="_blank" rel="noreferrer" className="secondary"><ExternalLink size={15} />Открыть Zernio</a><button className="secondary" disabled={busy || !configured} onClick={() => void sync()}>{busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{busy ? 'Загружаем соцсети…' : 'Обновить соцсети'}</button></div>
     {error && <p className="error-text" role="alert">{error}</p>}
     {result?.status === 'chooseProfile' && <form className="import-choice" onSubmit={event => { event.preventDefault(); void sync({ remoteProfileId }); }}>
       <label>Профиль в Zernio<select value={remoteProfileId} required disabled={busy} onChange={event => setRemoteProfileId(event.target.value)}><option value="">Выберите профиль</option>{result.profiles?.map(profile => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
@@ -54,7 +79,7 @@ export default function ProfileSocialAccounts({ profileId, configured, revision,
     <div className="connect-list">{channels.map(channel => <div className="connect-row" key={channel.id}>
       <img src={`/icons/${channel.platform === 'twitter' ? 'x' : channel.platform}.svg`} width={23} height={23} alt="" />
       <div><strong>{NETWORKS.find(network => network.id === channel.platform)?.name}</strong><small>{channel.username ? `@${channel.username.replace(/^@/, '')}` : 'Без имени'}</small></div>
-      <span className={`pill ${channel.state === 'connected' ? 'success' : 'neutral'}`}>{channel.state === 'connected' ? 'Подключено' : 'Проверьте в Zernio'}</span>
+      <span className={`pill ${channel.state === 'connected' ? 'success' : channel.state === 'inactive' ? 'bad' : 'neutral'}`}>{channel.state === 'connected' ? 'Подключено' : channel.state === 'inactive' ? 'Отключён, переподключите в Zernio' : 'Проверьте в Zernio'}</span>
     </div>)}</div>
     {!channels.length && !busy && result?.status !== 'chooseProfile' && result?.status !== 'chooseAccounts' && <p className="form-note">{!configured ? 'Добавьте API-ключ этого профиля, чтобы загрузить его соцсети.' : result?.message || 'Соцсети ещё не загружены. Нажмите «Обновить соцсети».'}</p>}
   </section>;

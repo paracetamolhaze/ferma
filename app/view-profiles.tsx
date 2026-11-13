@@ -1,13 +1,19 @@
 "use client";
 import { useEffect, useState } from 'react';
-import { AlertCircle, ArrowLeft, Check, ChevronRight, Plus } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Check, ChevronRight, Mail, MessageSquare, Plus, Upload } from 'lucide-react';
 import { requestJson } from '@/lib/client-api';
+import { missingNetworks, PROFILE_NETWORKS } from '@/lib/domain';
 import type { RecentMail } from '@/lib/mail';
 import ProfileKeyForm from './profile-key-form';
 import ProfileMail from './profile-mail';
 import ProfileNameForm from './profile-name-form';
 import ProfileSocialAccounts from './profile-social-accounts';
-import { Avatar, CopyButton, Empty, formatTime, needsSetup, Network, Segmented, useZernio, type Ctx, type Profile } from './shared';
+import { ProfileSms, useRecentSms } from './sms-panels';
+import { ProfileAccess } from './access-panels';
+import { AvatarPanel } from './avatar-panel';
+import { SocialPanel } from './social-panel';
+import { AutopilotPanel } from './autopilot-panel';
+import { Avatar, connectedNetworks, CopyButton, Empty, formatTime, needsSetup, Network, networkName, Segmented, useZernio, type Ctx, type Profile, type State } from './shared';
 import { PostsPanel, QueueEditor } from './view-posts';
 import { StatsPanel } from './view-stats';
 
@@ -30,18 +36,20 @@ export function ProfilesView({ ctx }: { ctx: Ctx }) {
       <input className="search" type="search" placeholder="Поиск профиля" aria-label="Поиск профиля" value={query} onChange={event => setQuery(event.target.value)} />
     </div>
     {rows.length ? <section className="panel"><div className="table-scroll"><table>
-      <thead><tr><th>Профиль</th><th>Соцсети</th><th>Ключ Zernio</th><th>Почта</th><th className="num">Публикации</th><th /></tr></thead>
+      <thead><tr><th>Профиль</th><th>Соцсети</th><th>Ключ Zernio</th><th>Почта и телефон</th><th className="num">Публикации</th><th /></tr></thead>
       <tbody>{rows.map(profile => {
         const channels = state.channels.filter(channel => channel.profileId === profile.id);
         const address = profile.emailLocal && domain ? `${profile.emailLocal}@${domain}` : '';
         const open = (tab = '') => ctx.go(`profile/${profile.id}${tab}`);
         return <tr key={profile.id} className="clickable" onClick={() => open()}>
           <td><span className="who"><Avatar profile={profile} /><strong>{profile.name}</strong></span></td>
-          <td>{channels.length ? <span className="networks">{channels.map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}</span>
-            : <button className="link" onClick={event => { event.stopPropagation(); open('/settings'); }}>Подключить</button>}</td>
+          <td><span className="networks">{channels.map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
+            {missingNetworks(connectedNetworks(profile.id, state)).map(network => <button key={network} className="link" onClick={event => { event.stopPropagation(); open('/settings'); }}>Подключить {networkName(network)}</button>)}</span></td>
           <td>{profile.configured ? <span className="yes"><Check size={14} />Добавлен</span> : <button className="link" onClick={event => { event.stopPropagation(); open('/settings'); }}>Добавить ключ</button>}</td>
-          <td>{address ? <span className="address-cell"><span>{address}</span><CopyButton value={address} /></span>
-            : <button className="link" onClick={event => { event.stopPropagation(); if (domain) open(); else ctx.go('settings'); }}>Добавить адрес</button>}</td>
+          <td><span className="contact-cell">{address ? <span className="address-cell"><span>{address}</span><CopyButton value={address} /></span>
+            : <button className="link" onClick={event => { event.stopPropagation(); if (domain) open(); else ctx.go('settings'); }}>Добавить адрес</button>}
+            {profile.phone ? <span className="address-cell"><span>{profile.phone}</span><CopyButton value={profile.phone} /></span>
+              : <button className="link" onClick={event => { event.stopPropagation(); open(); }}>Добавить номер</button>}</span></td>
           <td className="num">{totals[profile.id]?.data?.total ?? '—'}</td>
           <td className="row-actions"><ChevronRight size={16} /></td>
         </tr>;
@@ -50,19 +58,42 @@ export function ProfilesView({ ctx }: { ctx: Ctx }) {
   </div>;
 }
 
-type Tab = 'overview' | 'posts' | 'queue' | 'stats' | 'settings';
-const TABS: { id: Tab; text: string }[] = [{ id: 'overview', text: 'Почта и коды' }, { id: 'posts', text: 'Публикации' }, { id: 'queue', text: 'Автопубликация' }, { id: 'stats', text: 'Статистика' }, { id: 'settings', text: 'Подключения' }];
+function DeleteProfile({ profile, ctx }: { profile: Profile; ctx: Ctx }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function remove() {
+    if (!window.confirm(`Удалить профиль «${profile.name}»?
+
+Из FERMA удалятся его ключ Zernio, личность, запас фото, план, ключи входа и резервные коды. Запланированные публикации будут отменены в Zernio. Аккаунты в Instagram и Threads и уже вышедшие посты останутся. Отменить удаление нельзя.`)) return;
+    setBusy(true); setError('');
+    try {
+      const result = await requestJson<{ cancelled: number; notCancelled: number }>('/api/workspace', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'deleteProfile', profileId: profile.id }) });
+      await ctx.reload();
+      ctx.notify(result.notCancelled ? `Профиль удалён. Не удалось отменить в Zernio публикаций: ${result.notCancelled}, отмените их в кабинете Zernio.` : `Профиль удалён${result.cancelled ? `, отменено публикаций: ${result.cancelled}` : ''}.`);
+      ctx.go('profiles');
+    } catch (failure) { setError(failure instanceof Error ? failure.message : 'Не удалось удалить профиль.'); setBusy(false); }
+  }
+  return <section className="panel"><header className="panel-head"><h2>Удаление</h2></header><div className="panel-body">
+    <p className="muted">Удаляет профиль из FERMA вместе с ключами, личностью и запасом. Аккаунты в соцсетях не трогает.</p>
+    {error && <p className="error-text" role="alert">{error}</p>}
+    <button className="danger" style={{ justifySelf: 'start' }} disabled={busy} onClick={() => void remove()}>{busy ? 'Удаляем…' : 'Удалить профиль'}</button>
+  </div></section>;
+}
+type Tab = 'autopilot' | 'overview' | 'access' | 'posts' | 'queue' | 'stats' | 'settings';
+const TABS: { id: Tab; text: string }[] = [{ id: 'autopilot', text: 'Автопилот' }, { id: 'overview', text: 'Почта, СМС и коды' }, { id: 'access', text: 'Номер и защита' }, { id: 'posts', text: 'Публикации' }, { id: 'queue', text: 'Автопубликация' }, { id: 'stats', text: 'Статистика' }, { id: 'settings', text: 'Подключения' }];
 
 export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: string }) {
   const { state } = ctx;
   const profile = state.profiles.find(item => item.id === id);
   const [revision, setRevision] = useState(0);
   if (!profile) return <Empty title="Профиль не найден" action={<button className="ghost" onClick={() => ctx.go('profiles')}>К списку профилей</button>} />;
-  const current: Tab = TABS.some(item => item.id === tab) ? tab as Tab : 'overview';
+  const current: Tab = TABS.some(item => item.id === tab) ? tab as Tab : 'autopilot';
   const channels = state.channels.filter(channel => channel.profileId === id);
+  const connected = connectedNetworks(id, state);
   const steps = [
     { done: profile.configured, text: 'Добавьте ключ Zernio' },
-    { done: channels.some(channel => channel.state === 'connected'), text: 'Подключите соцсеть в Zernio и обновите список' },
+    { done: Boolean(profile.avatar), text: 'Загрузите аватарку' },
+    ...PROFILE_NETWORKS.map(network => ({ done: connected.includes(network), text: `Подключите ${networkName(network)}` })),
     { done: Boolean(state.mail && profile.emailLocal), text: 'Задайте адрес почты' },
   ];
   const open = (next: Tab) => ctx.go(`profile/${id}/${next}`);
@@ -70,7 +101,7 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
   return <div className="stack">
     <button className="link back" onClick={() => ctx.go('profiles')}><ArrowLeft size={14} />Все профили</button>
     <header className="profile-head">
-      <Avatar profile={profile} size="large" />
+      <button className="avatar-button" title="Сменить аватарку" onClick={() => open('settings')}><Avatar profile={profile} size="large" /></button>
       <div className="profile-title">
         <h1>{profile.name}</h1>
         <div className="profile-meta">
@@ -78,21 +109,29 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
           {!channels.length && <span className="muted">Соцсети не подключены</span>}
         </div>
       </div>
+      <button className="ghost" onClick={() => ctx.bulk(id)}><Upload size={16} />Пачку в очередь</button>
       <button className="primary" onClick={() => ctx.compose(id)}><Plus size={16} />Новая публикация</button>
     </header>
-    {steps.some(step => !step.done) && <div className="setup-steps">{steps.map(step =>
-      <button key={step.text} className={step.done ? 'done' : ''} onClick={() => step.text.includes('почты') ? open('overview') : open('settings')}>{step.done ? <Check size={15} /> : <AlertCircle size={15} />}{step.text}</button>)}</div>}
+    {steps.some(step => !step.done) && <div className="setup-steps">{steps.filter(step => !step.done).map(step =>
+      <button key={step.text} onClick={() => step.text.includes('почты') ? open('overview') : open('settings')}><AlertCircle size={15} />{step.text}</button>)}</div>}
     <nav className="tabs" aria-label="Разделы профиля">{TABS.map(item => <button key={item.id} aria-current={current === item.id ? 'page' : undefined} onClick={() => open(item.id)}>{item.text}</button>)}</nav>
-    {current === 'overview' && <ProfileMail key={profile.id} profileId={id} emailLocal={profile.emailLocal} domain={state.mail?.domain || null} onSaved={ctx.reload} onOpenSettings={() => ctx.go('settings')} />}
+    {current === 'overview' && <div className="columns">
+      <ProfileMail key={profile.id} profileId={id} emailLocal={profile.emailLocal} domain={state.mail?.domain || null} onSaved={ctx.reload} onOpenSettings={() => ctx.go('settings')} />
+      <ProfileSms key={`sms-${profile.id}`} profile={profile} ctx={ctx} />
+    </div>}
+    {current === 'autopilot' && <AutopilotPanel key={`autopilot-${profile.id}`} profile={profile} ctx={ctx} />}
+    {current === 'access' && <ProfileAccess key={`access-${profile.id}`} profile={profile} ctx={ctx} />}
     {current === 'posts' && <PostsPanel ctx={ctx} profiles={[profile]} />}
     {current === 'queue' && (profile.configured ? <QueueEditor profile={profile} ctx={ctx} /> : needsKey())}
     {current === 'stats' && (profile.configured ? <StatsPanel ctx={ctx} profiles={[profile]} /> : needsKey())}
     {current === 'settings' && <div className="columns">
-      <section className="panel"><header className="panel-head"><h2>Ключ Zernio</h2></header><div className="panel-body">
+      <div className="stack"><AvatarPanel profile={profile} ctx={ctx} /><section className="panel"><header className="panel-head"><h2>Ключ Zernio</h2></header><div className="panel-body">
         <ProfileKeyForm key={profile.id} profileId={id} name={profile.name} configured={profile.configured} canSave={state.canSaveKey} onSaved={async () => { await ctx.reload(); setRevision(value => value + 1); }} />
-      </div></section>
+      </div></section></div>
       <div className="stack">
         <section className="panel"><div className="panel-body"><ProfileSocialAccounts key={profile.id} profileId={id} configured={profile.configured} revision={revision} channels={channels} onUpdated={ctx.reload} /></div></section>
+        <SocialPanel key={`social-${profile.id}`} profile={profile} />
+        <DeleteProfile profile={profile} ctx={ctx} />
         <section className="panel"><header className="panel-head"><h2>Название</h2></header><div className="panel-body"><ProfileNameForm key={`name-${id}`} profileId={id} name={profile.name} onSaved={ctx.reload} /></div></section>
       </div>
     </div>}
@@ -125,17 +164,29 @@ export function useRecentMail(enabled: boolean) {
   return { emails, error, loading, refresh };
 }
 
-export function MailRows({ ctx, emails, profiles, compact = false }: { ctx: Ctx; emails: RecentMail[]; profiles: Profile[]; compact?: boolean }) {
+export type CodeRow = { id: string; channel: 'mail' | 'sms'; code: string | null; profileId: string | null; from: string; text: string; at: number };
+export function useRecentCodes(state: State) {
+  const mail = useRecentMail(Boolean(state.mail));
+  const sms = useRecentSms(Boolean(state.sms));
+  const rows: CodeRow[] = [
+    ...(mail.emails || []).map(email => ({ id: email.id, channel: 'mail' as const, code: email.code, profileId: email.profileId, from: email.from_address, text: email.subject || 'Без темы', at: email.received_at })),
+    ...(sms.messages || []).map(item => ({ id: item.id, channel: 'sms' as const, code: item.code, profileId: item.profileId, from: item.sender || 'Неизвестный отправитель', text: item.text, at: item.receivedAt })),
+  ].sort((a, b) => b.at - a.at);
+  const refresh = () => { void mail.refresh(); void sms.refresh(); };
+  const ready = (!state.mail || mail.emails !== null) && (!state.sms || sms.messages !== null);
+  return { rows, ready, loading: mail.loading || sms.loading, error: mail.error || sms.error, refresh, smsMessages: sms.messages || [] };
+}
+export function CodeRows({ ctx, rows, profiles, compact = false }: { ctx: Ctx; rows: CodeRow[]; profiles: Profile[]; compact?: boolean }) {
   return <div className="table-scroll"><table>
-    <thead><tr><th>Код</th><th>Профиль</th>{!compact && <th>От кого</th>}<th>Тема</th><th className="num">Когда</th></tr></thead>
-    <tbody>{emails.map(email => {
-      const profile = profiles.find(item => item.id === email.profileId);
-      return <tr key={email.id} className="clickable" onClick={() => ctx.go(`profile/${email.profileId}`)}>
-        <td>{email.code ? <span className="code-chip"><code>{email.code}</code><CopyButton value={email.code} onCopied={() => ctx.notify('Код скопирован.')} /></span> : <span className="muted">—</span>}</td>
-        <td className="nowrap">{profile?.name || '—'}</td>
-        {!compact && <td className="cut">{email.from_address}</td>}
-        <td className={compact ? 'cut narrow' : 'cut'}>{email.subject || 'Без темы'}</td>
-        <td className="num nowrap">{formatTime(email.received_at)}</td>
+    <thead><tr><th>Код</th><th>Профиль</th>{!compact && <th>От кого</th>}<th>Текст</th><th className="num">Когда</th></tr></thead>
+    <tbody>{rows.map(row => {
+      const profile = profiles.find(item => item.id === row.profileId);
+      return <tr key={`${row.channel}-${row.id}`} className={profile ? 'clickable' : ''} onClick={() => { if (profile) ctx.go(`profile/${profile.id}`); }}>
+        <td>{row.code ? <span className="code-chip"><code>{row.code}</code><CopyButton value={row.code} onCopied={() => ctx.notify('Код скопирован.')} /></span> : <span className="muted">—</span>}</td>
+        <td className="nowrap">{profile?.name || 'Без профиля'}</td>
+        {!compact && <td className="cut"><span className="channel">{row.channel === 'sms' ? <MessageSquare size={13} aria-label="СМС" /> : <Mail size={13} aria-label="Письмо" />}{row.from}</span></td>}
+        <td className={compact ? 'cut narrow' : 'cut'}>{row.text}</td>
+        <td className="num nowrap">{formatTime(row.at)}</td>
       </tr>;
     })}</tbody>
   </table></div>;

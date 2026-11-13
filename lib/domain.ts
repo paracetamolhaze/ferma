@@ -6,8 +6,9 @@ export const NETWORKS = [
   { id: "twitter", name: "X", symbol: "𝕏", color: "#171b20" },
 ];
 export const MAX_UPLOAD = 90 * 1024 * 1024;
-// A profile holds up to two networks; one connected network is enough to publish.
-export const isProfileReady = (connectedCount: number) => connectedCount >= 1;
+// Every profile is run on Instagram and Threads at the same time.
+export const PROFILE_NETWORKS = ["instagram", "threads"] as const;
+export const missingNetworks = (connected: string[]) => PROFILE_NETWORKS.filter(network => !connected.includes(network));
 export function validateSchedule(value: string) {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp) || timestamp < Date.now() + 120000) throw new Error("Выберите время хотя бы на 2 минуты позже текущего.");

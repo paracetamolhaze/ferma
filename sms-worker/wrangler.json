@@ -1,0 +1,11 @@
+{
+  "name": "sms-inbox",
+  "main": "index.mjs",
+  "compatibility_date": "2025-07-15",
+  "workers_dev": true,
+  "preview_urls": false,
+  "observability": { "enabled": false },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "sms-inbox", "database_id": "4be640b3-c743-4b4c-acbc-c87f684f2e29" }
+  ]
+}

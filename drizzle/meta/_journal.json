@@ -43,6 +43,48 @@
       "when": 1794228759726,
       "tag": "0005_profile_mail",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1794235712468,
+      "tag": "0006_profile_sms",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1794249166162,
+      "tag": "0007_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1794256682388,
+      "tag": "0008_avatar",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1794259792791,
+      "tag": "0009_autopilot",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1794335708245,
+      "tag": "0010_carousel",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1794448135019,
+      "tag": "0011_social",
+      "breakpoints": true
     }
   ]
 }

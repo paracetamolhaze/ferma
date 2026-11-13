@@ -67,6 +67,27 @@ export async function readStats(owner: string, profileId: string, days: number):
   return parse(dashboard, await zernio(`/analytics/dashboard?profileId=${remoteId}&fromDate=${day(window - 1)}&toDate=${day(0)}&compare=previous_period&topPosts=10&recentPosts=0`));
 }
 
+const followersByAccount = z.object({
+  followers: z.object({ byAccount: z.array(z.object({ accountId: z.string().nullish(), platform: z.string().nullish(), current: z.number().nullish() })).nullish() }).nullish(),
+}).passthrough();
+/** Followers of the profile's Instagram account (not the Threads one), or null when Zernio does not say. */
+export async function readInstagramFollowers(owner: string, profileId: string, accountId: string) {
+  const { zernio, remoteId } = await connect(owner, profileId);
+  const data = followersByAccount.parse(await zernio(`/analytics/dashboard?profileId=${remoteId}&fromDate=${day(6)}&toDate=${day(0)}&compare=previous_period&topPosts=10&recentPosts=0`));
+  const accounts = data.followers?.byAccount || [];
+  const entry = accounts.find(item => item.accountId === accountId) ?? accounts.find(item => item.platform === 'instagram');
+  return typeof entry?.current === 'number' ? entry.current : null;
+}
+
+export const CONNECT_PLATFORMS = ['instagram', 'threads'];
+export async function readConnectUrl(owner: string, profileId: string, platform: string) {
+  if (!CONNECT_PLATFORMS.includes(platform)) throw new ProviderError('Эту соцсеть нельзя подключить отсюда.', 400);
+  const { zernio, remoteId } = await connect(owner, profileId);
+  const { authUrl } = parse(z.object({ authUrl: z.string().url() }), await zernio(`/connect/${platform}?profileId=${remoteId}`));
+  if (!authUrl.startsWith('https://')) throw new ProviderError('Zernio вернул небезопасную ссылку подключения.', 503);
+  return { authUrl };
+}
+
 const slot = z.object({ dayOfWeek: z.number().int().min(0).max(6), time: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/) });
 const queueResponse = z.object({
   exists: z.boolean().optional(),

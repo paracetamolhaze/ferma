@@ -9,12 +9,16 @@ import { createZernioClient, ProviderError } from "@/lib/zernio";
 import { canSaveIntegrationKey } from '@/lib/integration-settings';
 import { importSocialAccounts } from '@/lib/social-import';
 import { readMailSettings } from '@/lib/mail';
+import { deleteProfile } from '@/lib/profile-delete';
+import { readSmsSettings } from '@/lib/sms';
+import { hasFivesim } from '@/lib/fivesim';
 
 export const dynamic = "force-dynamic";
 const id = z.string().uuid();
 const network = z.enum(["youtube", "tiktok", "instagram", "threads", "twitter"]);
 const inputSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("profile"), name: z.string().trim().min(1).max(80), description: z.string().max(300).default(""), color: z.string().regex(/^#[0-9a-f]{6}$/i) }),
+  z.object({ action: z.literal("deleteProfile"), profileId: id }),
   z.object({ action: z.literal("renameProfile"), profileId: id, name: z.string().trim().min(1).max(80) }),
   z.object({ action: z.literal("importAccounts"), profileId: id, remoteProfileId: z.string().min(1).max(200).optional(), accountIds: z.array(z.string().min(1).max(200)).max(2).optional() }),
   z.object({ action: z.literal("sync"), profileId: id.optional() }),
@@ -55,15 +59,17 @@ export async function GET() {
   if (!user) return json({ error: "Войдите в аккаунт." }, 401);
   const db = getDb();
   const ps = await db.select().from(profiles).where(eq(profiles.owner, user.userId)).orderBy(desc(profiles.createdAt));
-  const [cs, ms, ts, keys, mail] = await Promise.all([
+  const [cs, ms, ts, keys, mail, sms, fivesim] = await Promise.all([
     ps.length ? db.select().from(channels).where(inArray(channels.profileId, ps.map(p => p.id))) : [],
     db.select({ id: media.id, name: media.name, type: media.type, size: media.size, createdAt: media.createdAt }).from(media).where(eq(media.owner, user.userId)).orderBy(desc(media.createdAt)),
     db.select({ id: posts.id, profileId: posts.profileId, zernioId: posts.zernioId, title: posts.title, content: posts.content, mediaId: posts.mediaId, platforms: posts.platforms, status: posts.status, scheduledFor: posts.scheduledFor, error: posts.error, createdAt: posts.createdAt }).from(posts).where(eq(posts.owner, user.userId)).orderBy(desc(posts.createdAt)),
     db.select({ profileId: profileIntegrations.profileId }).from(profileIntegrations).where(eq(profileIntegrations.owner, user.userId)),
     readMailSettings(user.userId),
+    readSmsSettings(user.userId),
+    hasFivesim(user.userId),
   ]);
   const configuredIds = new Set(keys.map(key => key.profileId));
-  return json({ profiles: ps.map(({ owner, zernioId, accountSelection, ...p }) => ({ ...p, configured: configuredIds.has(p.id) })), channels: cs, media: ms, posts: ts, canSaveKey: canSaveIntegrationKey(), mail });
+  return json({ profiles: ps.map(({ owner, zernioId, accountSelection, avatarKey, ...p }) => ({ ...p, avatar: avatarKey ? avatarKey.split('/').pop() : null, configured: configuredIds.has(p.id) })), channels: cs, media: ms, posts: ts, canSaveKey: canSaveIntegrationKey(), mail, sms, fivesim });
 }
 export async function POST(request: Request) {
   const user = await getChatGPTUser();
@@ -90,6 +96,7 @@ export async function POST(request: Request) {
       if (failures.length) throw new Error(`Не удалось обновить: ${failures.join('; ')}. Остальные профили обработаны.`);
       return json({ ok: true });
     }
+    if (input.action === "deleteProfile") return json(await deleteProfile(owner, input.profileId));
     if (input.action === "renameProfile") {
       const changed = await db.update(profiles).set({ name: input.name }).where(and(eq(profiles.id, input.profileId), eq(profiles.owner, owner))).returning({ id: profiles.id });
       if (!changed.length) throw new Error('Профиль не найден.');

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { getChatGPTUser } from '../../chatgpt-auth';
 import { ProviderError } from '@/lib/zernio';
-import { queueInput, readQueue, readRemotePosts, readStats, saveQueue } from '@/lib/zernio-insights';
+import { queueInput, readConnectUrl, readQueue, readRemotePosts, readStats, saveQueue } from '@/lib/zernio-insights';
 
 export const dynamic = 'force-dynamic';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -30,8 +30,13 @@ export async function POST(request: Request) {
   const user = await getChatGPTUser();
   if (!user) return json({ error: 'Войдите в аккаунт.' }, 401);
   if (request.headers.get('origin') !== new URL(request.url).origin) return json({ error: 'Недопустимый источник запроса.' }, 403);
-  const body = await request.json().catch(() => null) as { profileId?: unknown } | null;
+  const body = await request.json().catch(() => null) as { profileId?: unknown; connect?: unknown } | null;
   const profile = profileId.safeParse(body?.profileId);
+  if (typeof body?.connect === 'string') {
+    if (!profile.success) return json({ error: 'Профиль не найден.' }, 404);
+    try { return json(await readConnectUrl(user.userId, profile.data, body.connect)); }
+    catch (error) { return failure(error); }
+  }
   const input = queueInput.safeParse(body);
   if (!profile.success || !input.success) return json({ error: 'Добавьте хотя бы одно время публикации.' }, 400);
   try { return json(await saveQueue(user.userId, profile.data, input.data)); }

@@ -10,7 +10,7 @@ test('Zernio data is read with the profile own key, for its own remote profile o
   const { outputFiles } = await build({
     stdin: { contents: `
       import { saveZernioKey } from './lib/integration-settings';
-      import { readQueue, readRemotePosts, readStats, saveQueue } from './lib/zernio-insights';
+      import { readConnectUrl, readQueue, readRemotePosts, readStats, saveQueue } from './lib/zernio-insights';
       export default { async fetch(request) {
         const i = await request.json();
         try {
@@ -18,6 +18,7 @@ test('Zernio data is read with the profile own key, for its own remote profile o
           if (i.action === 'posts') return Response.json(await readRemotePosts(i.owner, i.profileId, i.status));
           if (i.action === 'stats') return Response.json(await readStats(i.owner, i.profileId, i.days));
           if (i.action === 'queue') return Response.json(await readQueue(i.owner, i.profileId));
+          if (i.action === 'connect') return Response.json(await readConnectUrl(i.owner, i.profileId, i.platform));
           return Response.json(await saveQueue(i.owner, i.profileId, i.input));
         } catch (error) { return Response.json({ error: error.message }, { status: error.status || 500 }); }
       }};`, resolveDir: root, loader: 'ts' },
@@ -42,6 +43,8 @@ test('Zernio data is read with the profile own key, for its own remote profile o
       }
       if (url.pathname === '/api/v1/queue/slots' && request.method === 'PUT') { saved = await request.json(); return Response.json({ success: true }); }
       if (url.pathname === '/api/v1/queue/slots') return Response.json(saved ? { exists: true, schedule: { slots: saved.slots, active: saved.active, timezone: saved.timezone }, nextSlots: ['2026-11-10T12:00:00+05:00'] } : { exists: false, schedule: null, nextSlots: [] });
+      if (url.pathname === '/api/v1/connect/instagram') return Response.json({ authUrl: 'https://zernio.com/oauth/start' });
+      if (url.pathname === '/api/v1/connect/threads') return Response.json({ authUrl: 'http://evil.example/' });
       return Response.json({ error: 'unexpected' }, { status: 404 });
     },
   });
@@ -101,6 +104,12 @@ test('Zernio data is read with the profile own key, for its own remote profile o
   assert.equal(saved.timezone, 'Asia/Qyzylorda');
   assert.equal(saved.slots.length, 2);
   assert.deepEqual([queue.exists, queue.active, queue.nextSlots.length], [true, true, 1]);
+
+  // Connecting: only the profile's own networks, only safe login links.
+  assert.equal((await call({ action: 'connect', profileId: 'a', platform: 'instagram' })).authUrl, 'https://zernio.com/oauth/start');
+  assert.match(outbound.at(-1).path, /profileId=remote-a/);
+  assert.equal((await call({ action: 'connect', profileId: 'a', platform: 'threads' })).status, 503);
+  assert.equal((await call({ action: 'connect', profileId: 'a', platform: 'slack' })).status, 400);
 
   // Nothing leaves without a key, a binding or ownership.
   outbound.length = 0;
