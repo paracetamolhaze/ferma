@@ -46,6 +46,8 @@ services:
       MEDIA_CONCURRENCY: "1"
       MEDIA_QUEUE: "4"
       SHARP_THREADS: "1"
+      # Checks read pictures from memory and write nothing to /tmp (256 MB): refuse only when it is nearly full.
+      MEDIA_MIN_DISK_MB: "32"
     # Checking a picture takes a fraction of a second: one job at a time on 1 CPU is plenty.
     cpus: 1
     mem_limit: 512m
