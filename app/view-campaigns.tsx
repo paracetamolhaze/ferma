@@ -78,7 +78,7 @@ function CampaignsPanel({ ctx, data, topics, reload }: { ctx: Ctx; data: Campaig
           <td><span className="post-text"><strong>{row.title}</strong>{row.urgent && <small>срочно</small>}</span></td><td>{row.profile}</td><td><Network platform={row.platform} username={row.username} /></td>
           <td>{row.style ? `${styleName(row.style)} · ${FORMAT_NAMES[row.format || ''] || row.format}` : '—'}</td>
           <td className="nowrap">{row.at ? formatDate(row.at) : '—'}</td>
-          <td>{row.reason ? <small className="muted">{row.reason}</small> : <small>{MODE_NAMES[preview.campaign.mode]}</small>}</td>
+          <td>{row.reason ? <small className="muted">{row.reason}</small> : <small>{statusNames[row.status] || row.status}</small>}</td>
         </tr>)}</tbody>
       </table></div> : <p className="muted">Подходящих материалов и аккаунтов сейчас нет. Проверьте темы кампании и профилей и подключение аккаунтов.</p>}
       <p className="muted">Предпросмотр ничего не создаёт и не публикует. Варианты показаны любые, а выйдут только проверенные редактором.</p>
@@ -137,6 +137,7 @@ function EditorialModal({ ctx, profile, row, topics, palettes, close, onSaved }:
           <small className="muted">Первыми профиль берёт варианты: {firstAngles(form.style)}. Среди них — с лучшей оценкой ИИ-редактора.</small>
           <fieldset><legend>Форматы в Threads</legend><div className="targets">{['text', 'image', 'carousel'].map(id => <label key={id}><input type="checkbox" checked={form.formats.includes(id)} onChange={() => toggle('formats', id)} />{FORMAT_NAMES[id]}</label>)}</div></fieldset>
           <small className="muted">В Instagram выходят только карусели Gudini.</small>
+          {!form.formats.length && <small className="error-text">Отметьте хотя бы один формат для Threads.</small>}
         </div>
         <div className="form-stack">
           <fieldset><legend>Сколько в день</legend><div className="targets">
@@ -158,7 +159,7 @@ function EditorialModal({ ctx, profile, row, topics, palettes, close, onSaved }:
         </div>
       </div>
       <ErrorLine text={action.error} />
-      <div className="modal-footer"><button type="button" className="ghost" onClick={close}>Отмена</button><button className="primary" disabled={Boolean(action.busy)}><Spin on={action.busy === 'save'}><Check size={15} /></Spin>Сохранить</button></div>
+      <div className="modal-footer"><button type="button" className="ghost" onClick={close}>Отмена</button><button className="primary" disabled={Boolean(action.busy) || !form.formats.length}><Spin on={action.busy === 'save'}><Check size={15} /></Spin>Сохранить</button></div>
     </form>
   </Modal>;
 }

@@ -1,5 +1,5 @@
-# Dependencies
-/node_modules/
+# Dependencies (the workers have their own)
+node_modules/
 /.pnp
 .pnp.*
 # Keep authored Yarn tooling if the project adopts Yarn.

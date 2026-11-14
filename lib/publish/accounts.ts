@@ -2,7 +2,7 @@
  * Social accounts connected through the owner's own Meta app: app settings, OAuth, encrypted tokens,
  * connection checks and token refresh. Every account keeps its own token; nothing is shared between accounts.
  */
-import { and, asc, eq, lt } from 'drizzle-orm';
+import { and, asc, eq, inArray, lt, ne } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { oauthStates, profiles, providerApps, publications, socialAccounts } from '@/db/schema';
 import { openSecret, sealSecret } from '../content/secrets';
@@ -86,7 +86,8 @@ export async function tokenOf(owner: string, account: Account): Promise<Token> {
 }
 async function storeToken(owner: string, account: Account, token: Token) {
   const encryptedToken = await sealSecret(owner, `account:${account.provider}:${account.remoteId}`, JSON.stringify(token));
-  await getDb().update(socialAccounts).set({ encryptedToken, tokenExpiresAt: token.expiresAt, tokenObtainedAt: token.obtainedAt, updatedAt: now() }).where(eq(socialAccounts.id, account.id));
+  // An account removed meanwhile keeps its empty token.
+  await getDb().update(socialAccounts).set({ encryptedToken, tokenExpiresAt: token.expiresAt, tokenObtainedAt: token.obtainedAt, updatedAt: now() }).where(and(eq(socialAccounts.id, account.id), ne(socialAccounts.status, 'disabled')));
 }
 /** A token that is about to run out is renewed; an account whose token was refused is marked for reconnection. */
 export async function freshToken(owner: string, account: Account, request: typeof fetch = fetch, nowMs = Date.now()) {
@@ -97,7 +98,8 @@ export async function freshToken(owner: string, account: Account, request: typeo
   }
   try {
     const fresh = await adapterFor(account.provider as Provider, request).refresh(token, nowMs);
-    if (fresh.accessToken !== token.accessToken) await storeToken(owner, account, fresh);
+    // A renewal may keep the same token string with a new expiry: whatever was renewed is stored.
+    if (fresh !== token) await storeToken(owner, account, fresh);
     return fresh;
   } catch (error) {
     if (error instanceof PublishError && error.kind === 'auth') {
@@ -119,13 +121,16 @@ export async function checkAccounts(owner: string, request: typeof fetch = fetch
       const adapter = adapterFor(account.provider as Provider, request);
       const remote = await adapter.checkConnection(token);
       const quota = await adapter.quota(token).catch(() => null);
-      await db.update(socialAccounts).set({ status: 'connected', error: null, username: remote.username || account.username, followers: remote.followers ?? account.followers, quotaUsed: quota?.used ?? null, quotaTotal: quota?.total ?? null, lastCheckedAt: new Date(nowMs).toISOString(), updatedAt: now() }).where(eq(socialAccounts.id, account.id));
-      if (account.status !== 'connected') changes.push({ id: account.id, status: 'connected' });
+      // Written only if nobody changed the account during the check (the owner may have disabled or removed it).
+      const updated = await db.update(socialAccounts).set({ status: 'connected', error: null, username: remote.username || account.username, followers: remote.followers ?? account.followers, quotaUsed: quota?.used ?? null, quotaTotal: quota?.total ?? null, lastCheckedAt: new Date(nowMs).toISOString(), updatedAt: now() })
+        .where(and(eq(socialAccounts.id, account.id), eq(socialAccounts.status, account.status))).returning({ id: socialAccounts.id });
+      if (updated.length && account.status !== 'connected') changes.push({ id: account.id, status: 'connected' });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Проверка не удалась.';
       const status = error instanceof PublishError && error.kind === 'auth' ? 'expired' : error instanceof AccountError && error.status === 409 ? 'expired' : account.status === 'connected' ? 'connected' : 'error';
-      await db.update(socialAccounts).set({ status, error: message.slice(0, 300), lastCheckedAt: new Date(nowMs).toISOString(), updatedAt: now() }).where(eq(socialAccounts.id, account.id));
-      if (status !== account.status) changes.push({ id: account.id, status });
+      const updated = await db.update(socialAccounts).set({ status, error: message.slice(0, 300), lastCheckedAt: new Date(nowMs).toISOString(), updatedAt: now() })
+        .where(and(eq(socialAccounts.id, account.id), inArray(socialAccounts.status, [account.status, 'expired']))).returning({ id: socialAccounts.id });
+      if (updated.length && status !== account.status) changes.push({ id: account.id, status });
     }
   }
   return { checked: rows.length, changes };
@@ -141,12 +146,13 @@ export async function removeAccount(owner: string, accountId: string) {
   const db = getDb();
   const [account] = await db.select().from(socialAccounts).where(and(eq(socialAccounts.id, accountId), eq(socialAccounts.owner, owner)));
   if (!account) throw new AccountError('Аккаунт не найден.', 404);
-  const busy = await db.select({ id: publications.id }).from(publications).where(and(eq(publications.accountId, accountId), eq(publications.status, 'publishing'))).limit(1);
+  const busy = await db.select({ id: publications.id }).from(publications).where(and(eq(publications.accountId, accountId), inArray(publications.status, ['preparing', 'publishing']))).limit(1);
   if (busy.length) throw new AccountError('Сейчас идёт публикация в этот аккаунт. Повторите через минуту.', 409);
   // Publications keep their history; the account row stays as «disabled» so the history still points somewhere.
+  // Waiting ones are cancelled (a container made for them is never published). One that may already be out stays
+  // «uncertain»: it is settled if the account is connected again, or the owner cancels it in «Публикациях».
   await db.batch([
-    db.update(publications).set({ status: 'cancelled', error: 'Аккаунт отключён в FERMA.', updatedAt: now() }).where(and(eq(publications.accountId, accountId), eq(publications.status, 'scheduled'))),
-    db.update(publications).set({ status: 'cancelled', error: 'Аккаунт отключён в FERMA.', updatedAt: now() }).where(and(eq(publications.accountId, accountId), eq(publications.status, 'awaiting_approval'))),
+    db.update(publications).set({ status: 'cancelled', error: 'Аккаунт отключён в FERMA.', lockedUntil: null, updatedAt: now() }).where(and(eq(publications.accountId, accountId), inArray(publications.status, ['draft', 'awaiting_approval', 'scheduled', 'processing']))),
     db.update(socialAccounts).set({ status: 'disabled', encryptedToken: '', error: 'Отключён владельцем.', updatedAt: now() }).where(eq(socialAccounts.id, accountId)),
   ]);
   return { ok: true };

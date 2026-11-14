@@ -115,7 +115,8 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   const threadsCalls = [], instagramCalls = [];
   // When the post whose answer is lost appears in the account (set on the test's own clock).
   let igPostAt = new Date(NOW + 3600_000).toISOString();
-  let threadsContainer = 0, threadsPosts = 0, igContainer = 0, igPublishMode = 'ok', igContainerStatus = 'FINISHED', igPublished = null, threadsLimitOnce = false;
+  let threadsContainer = 0, threadsPosts = 0, igContainer = 0, igPublishMode = 'ok', igContainerStatus = 'FINISHED', igPublished = null, threadsLimitOnce = false, threadsPublishLost = false;
+  const publishedContainers = new Set();
   const THREADS_SCOPES = ['threads_basic', 'threads_content_publish', 'threads_manage_insights', 'threads_read_replies', 'threads_manage_replies'];
   const mf = new Miniflare({
     modules: true, script: outputFiles[0].text, compatibilityDate: '2026-05-15', d1Databases: ['DB'], r2Buckets: ['BUCKET'],
@@ -170,8 +171,13 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
           if (threadsLimitOnce) { threadsLimitOnce = false; return Response.json({ error: { message: 'Application request limit reached', code: 4 } }, { status: 429, headers: { 'retry-after': '1800', 'x-business-use-case-usage': JSON.stringify({ 'th-1': [{ type: 'threads', call_count: 100, estimated_time_to_regain_access: 45 }] }) } }); }
           return Response.json({ id: `thc-${++threadsContainer}` });
         }
-        if (url.pathname === '/v1.0/th-1/threads_publish') return Response.json({ id: `thpost-${++threadsPosts}` });
-        if (url.pathname.startsWith('/v1.0/thc-')) return Response.json({ status: 'FINISHED' });
+        if (url.pathname === '/v1.0/th-1/threads_publish') {
+          // A published container says so afterwards; a lost answer is a dropped connection after the post is out.
+          publishedContainers.add(form.creation_id);
+          if (threadsPublishLost) { threadsPublishLost = false; throw new Error('connection reset'); }
+          return Response.json({ id: `thpost-${++threadsPosts}` });
+        }
+        if (url.pathname.startsWith('/v1.0/thc-')) return Response.json({ status: publishedContainers.has(url.pathname.slice('/v1.0/'.length)) ? 'PUBLISHED' : 'FINISHED' });
         if (/^\/v1\.0\/thpost-\d+$/.test(url.pathname)) return Response.json({ permalink: `https://www.threads.com/@news_daily/post/${url.pathname.split('-')[1]}`, timestamp: '2026-11-14T05:00:00+0000' });
         if (/^\/v1\.0\/thpost-\d+\/insights$/.test(url.pathname)) return Response.json({ data: [{ name: 'views', values: [{ value: 120 }] }, { name: 'likes', values: [{ value: 7 }] }] });
         if (/^\/v1\.0\/thpost-\d+\/replies$/.test(url.pathname)) {
@@ -522,6 +528,20 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   const answered = await ok({ action: 'activity', now: t12 + 60_000 });
   assert.deepEqual([answered.waiting, answered.answeredToday], [0, 2]);
   assert.ok((await ok({ action: 'activity', accountId: accountIds.threads, now: t12 })).history.length >= 2, 'history of one account');
+  // A reply whose publish answer got lost: the container is asked, the reply is never posted twice.
+  await db.prepare(`UPDATE engagement_tasks SET status = 'suggested', error = NULL WHERE id = '${taskIds.r2a}'`).run();
+  assert.equal((await ok({ action: 'sendReply', id: taskIds.r2a, text: 'Спасибо, что читаете.', now: t12 })).status, 'sending');
+  const { replyContainerId } = (await rows(`SELECT replyContainerId FROM engagement_tasks WHERE id = '${taskIds.r2a}'`))[0];
+  threadsPublishLost = true;
+  assert.equal((await ok({ action: 'replyTick', now: t12 + 31_000 })).sent, 0);
+  assert.equal((await rows(`SELECT status FROM engagement_tasks WHERE id = '${taskIds.r2a}'`))[0].status, 'sending', 'a lost answer is not a failure: the reply may be out');
+  assert.equal((await ok({ action: 'replyTick', now: t12 + 95_000 })).sent, 1, 'the container says the reply is out');
+  assert.equal(threadsCalls.filter(entry => entry.path === '/v1.0/th-1/threads_publish' && entry.form.creation_id === replyContainerId).length, 1, 'the reply is published once');
+  // «Отправить» pressed again on a failed task whose reply is out: nothing new is made.
+  await db.prepare(`UPDATE engagement_tasks SET status = 'failed' WHERE id = '${taskIds.r2a}'`).run();
+  const containersBefore = threadsContainer;
+  assert.deepEqual(await ok({ action: 'sendReply', id: taskIds.r2a, text: 'Спасибо, что читаете.', now: t12 + 120_000 }), { status: 'sent', already: true });
+  assert.equal(threadsContainer, containersBefore, 'no second reply container');
 
   // ---- 12c. Analytics: only the numbers the networks gave; no conclusion from three posts
   const analytics = await ok({ action: 'analytics', now: t12 });
@@ -559,6 +579,20 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   assert.equal(stopped.autopublish, false);
   assert.deepEqual(stopped.running, { campaigns: 0, autopilots: 0, zernioWaiting: 0 });
   assert.equal((await ok({ action: 'tick', now: night + 3600_000 })).off, true);
+  // A publication whose answer was lost is still settled, but a ready container is not published while stopped.
+  await db.prepare(`INSERT INTO publications (id, owner, profileId, accountId, provider, platform, itemId, variantId, format, status, text, scheduledFor, parentContainerId, containerIds, idempotencyKey, createdAt, updatedAt) VALUES ('held-pub', '${OWNER}', '${P}', '${accountIds.threads}', 'meta_threads', 'threads', 'held-item', 'none', 'text', 'uncertain', 'held', '${new Date(night).toISOString()}', 'thc-held', '{"ids":[],"at":${night}}', 'test:held', '2026-11-14', '2026-11-14')`).run();
+  const publishCalls = threadsCalls.filter(entry => entry.path === '/v1.0/th-1/threads_publish').length;
+  await ok({ action: 'tick', now: night + 3600_000 + 60_000 });
+  assert.equal((await rows(`SELECT status FROM publications WHERE id = 'held-pub'`))[0].status, 'processing', 'checked: not out, waits for publishing to be switched on');
+  assert.equal(threadsCalls.filter(entry => entry.path === '/v1.0/th-1/threads_publish').length, publishCalls, 'nothing goes out after «Остановить всё»');
+  // Approving a publication whose version waits for the owner approves the version too, so the quality check keeps it.
+  const versionId = (await rows(`SELECT variantId FROM publications WHERE id = '${threadsPub}'`))[0].variantId;
+  await db.prepare(`UPDATE content_variants SET status = 'review' WHERE id = '${versionId}'`).run();
+  await db.prepare(`INSERT INTO publications (id, owner, profileId, accountId, provider, platform, itemId, variantId, format, status, scheduledFor, idempotencyKey, createdAt, updatedAt) VALUES ('approve-pub', '${OWNER}', '${P}', '${accountIds.threads}', 'meta_threads', 'threads', 'approve-item', '${versionId}', 'text', 'awaiting_approval', '${new Date(night + 7200_000).toISOString()}', 'test:approve', '2026-11-14', '2026-11-14')`).run();
+  await ok({ action: 'approve', id: 'approve-pub' });
+  await ok({ action: 'distribute', now: night + 3600_000 + 120_000 });
+  assert.equal((await rows(`SELECT status FROM content_variants WHERE id = '${versionId}'`))[0].status, 'ready');
+  assert.equal((await rows(`SELECT status FROM publications WHERE id = 'approve-pub'`))[0].status, 'scheduled', 'the approval stays');
 
   // ---- 16. «Состояние системы» and media retention: FERMA's drawn cards go after the period, Gudini's originals never
   const system = await ok({ action: 'system', now: night });

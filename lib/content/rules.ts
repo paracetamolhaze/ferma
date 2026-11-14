@@ -39,15 +39,15 @@ export function topicScore(topics: string[], item: Topical) {
   return score;
 }
 
-/** The version for an account: a format the platform takes and the profile wants, then the profile's preferred style. */
 /**
  * The version for an account. Only versions the editor passed are given out (a preview may look at planned ones):
- * a format the platform takes and the profile wants, then the editor's best rating, then the profile's style.
+ * a format the platform takes (on Threads also one the profile wants), then the editor's best rating, then the
+ * profile's style. The profile's formats are its Threads formats: Instagram takes Gudini's carousels whatever they are.
  */
 export function pickVariant<T extends { id: string; style: string; format: string; status: string; profileId: string | null; score?: number | null }>(variants: T[], platform: string, editorial: Pick<Editorial, 'style' | 'formats'>, kind: string, { passedOnly = true } = {}): T | null {
   const allowed = PLATFORM_FORMATS[platform] || [];
   const usable = passedOnly ? ['ready', 'written', 'rendering'] : ['planned', 'writing', 'reviewing', 'written', 'rendering', 'ready'];
-  const free = variants.filter(variant => !variant.profileId && usable.includes(variant.status) && allowed.includes(variant.format) && editorial.formats.includes(variant.format));
+  const free = variants.filter(variant => !variant.profileId && usable.includes(variant.status) && allowed.includes(variant.format) && (platform !== 'threads' || editorial.formats.includes(variant.format)));
   const styles = STYLE_ORDER[editorial.style] || STYLE_ORDER.neutral;
   // Threads reads news best as text, Instagram as cards: the format comes before the rating and the style.
   const formatRank = (format: string) => platform === 'threads' && kind === 'news' ? ['text', 'image', 'carousel'].indexOf(format) : platform === 'instagram' ? ['carousel'].indexOf(format) : ['carousel', 'text', 'image'].indexOf(format);

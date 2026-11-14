@@ -14,9 +14,9 @@ test('Docker boundary restricts hosts and origins and replaces forged identity',
   const gateway = createGateway(upstream.address().port).listen(0, '127.0.0.1');
   await once(gateway, 'listening');
   t.after(() => { gateway.close(); upstream.close(); });
-  function request(headers = {}, method = 'GET', body = '') {
+  function request(headers = {}, method = 'GET', body = '', path = '/api/workspace') {
     return new Promise((resolve, reject) => {
-      const req = http.request({ hostname: '127.0.0.1', port: gateway.address().port, path: '/api/workspace', method, headers }, res => {
+      const req = http.request({ hostname: '127.0.0.1', port: gateway.address().port, path, method, headers }, res => {
         let text = '';
         res.on('data', chunk => { text += chunk; });
         res.on('end', () => resolve({ status: res.statusCode, text }));
@@ -28,6 +28,12 @@ test('Docker boundary restricts hosts and origins and replaces forged identity',
   assert.equal((await request({ host: 'attacker.example:3100' })).status, 403);
   assert.equal((await request({ host: 'localhost:3100', origin: 'https://attacker.example' }, 'POST')).status, 403);
   assert.equal((await request({ host: 'localhost:3100', 'sec-fetch-site': 'cross-site' })).status, 403);
+  // The return from Meta's login: a page visit of the start page only.
+  const page = { host: 'localhost:3100', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate' };
+  assert.equal((await request(page, 'GET', '', '/')).status, 200);
+  assert.equal((await request(page, 'GET', '', '/api/workspace')).status, 403);
+  assert.equal((await request(page, 'POST', '', '/')).status, 403);
+  assert.equal((await request({ ...page, 'sec-fetch-mode': 'cors' }, 'GET', '', '/')).status, 403);
   const allowed = await request({ host: 'localhost:3100', origin: 'http://localhost:3100', 'oai-authenticated-user-id': 'forged', 'x-forwarded-host': 'attacker.example', 'content-type': 'application/json' }, 'POST', '{"action":"profile"}');
   assert.equal(allowed.status, 200);
   const proxied = JSON.parse(allowed.text);

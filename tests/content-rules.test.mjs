@@ -90,7 +90,8 @@ test('distribution rules: topics, formats per platform, styles, modes', () => {
   ];
   assert.equal(pickVariant(variants, 'instagram', DEFAULT_EDITORIAL, 'carousel').id, 'b', 'Instagram gets carousels');
   assert.equal(pickVariant(variants, 'threads', DEFAULT_EDITORIAL, 'news').id, 'a', 'Threads reads news as text');
-  assert.equal(pickVariant(variants, 'instagram', { ...DEFAULT_EDITORIAL, formats: ['image'] }, 'news'), null, 'a 9:16 news cover never goes to the Instagram feed');
+  assert.equal(pickVariant(variants.filter(entry => entry.format !== 'carousel'), 'instagram', DEFAULT_EDITORIAL, 'news'), null, 'a 9:16 news cover never goes to the Instagram feed');
+  assert.equal(pickVariant(variants, 'instagram', { ...DEFAULT_EDITORIAL, formats: ['text'] }, 'news').id, 'b', 'the profile\'s Threads formats do not switch Instagram off');
   assert.equal(pickVariant(variants, 'threads', { ...DEFAULT_EDITORIAL, formats: ['image'] }, 'news').id, 'c', 'the profile can limit formats');
   assert.equal(pickVariant(variants.map(entry => ({ ...entry, profileId: 'taken' })), 'threads', DEFAULT_EDITORIAL, 'news'), null, 'a version goes to one account only');
   assert.equal(effectiveMode('auto', 'manual'), 'manual');

@@ -53,7 +53,7 @@ const inputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('campaignStatus'), id, status: z.enum(['active', 'paused']) }),
   z.object({ action: z.literal('previewCampaign'), id }),
   z.object({ action: z.literal('saveEditorial'), profileId: id, topics: z.array(z.string().max(80)).max(30).optional(), style: z.enum(['neutral', 'short', 'expert', 'casual']).optional(), formats: z.array(z.enum(['text', 'image', 'carousel'])).min(1).optional(), perDay: z.record(z.number().int().min(0).max(20)).optional(), windows: z.array(z.tuple([z.number().min(0).max(24), z.number().min(0).max(24)])).min(1).max(4).optional(), timezoneOffsetMinutes: z.number().int().min(-720).max(840).optional(), minGapMinutes: z.number().int().min(15).max(1440).optional(), mode: mode.optional(), design: z.record(z.unknown()).nullish() }),
-  z.object({ action: z.literal('heartbeat'), name: z.enum(['engine', 'media']), ok: z.boolean(), note: z.string().max(500).nullish(), details: z.unknown().optional() }),
+  z.object({ action: z.literal('heartbeat'), name: z.enum(['engine', 'media']), ok: z.boolean(), note: z.string().max(5000).nullish(), details: z.unknown().optional() }),
 ]);
 
 export async function GET(request: Request) {

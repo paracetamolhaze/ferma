@@ -54,7 +54,10 @@ function versionText(variant: typeof contentVariants.$inferSelect, item: ExportI
 /** The next material whose versions wait for the editor, as one task for the GPT bridge. */
 export async function reviewJob(owner: string) {
   const db = getDb();
-  const [next] = await db.select({ itemId: contentVariants.itemId }).from(contentVariants).where(and(eq(contentVariants.owner, owner), eq(contentVariants.status, 'reviewing'))).groupBy(contentVariants.itemId).orderBy(asc(sql`min(${contentVariants.updatedAt})`)).limit(1);
+  // Only versions of the material's current text: older ones are out of date and must never block the queue.
+  const [next] = await db.select({ itemId: contentVariants.itemId }).from(contentVariants)
+    .innerJoin(sourceItems, and(eq(sourceItems.id, contentVariants.itemId), eq(sourceItems.revision, contentVariants.revision)))
+    .where(and(eq(contentVariants.owner, owner), eq(contentVariants.status, 'reviewing'))).groupBy(contentVariants.itemId).orderBy(asc(sql`min(${contentVariants.updatedAt})`)).limit(1);
   if (!next) return null;
   const [row] = await db.select().from(sourceItems).where(and(eq(sourceItems.id, next.itemId), eq(sourceItems.owner, owner)));
   if (!row) return null;

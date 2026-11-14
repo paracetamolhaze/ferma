@@ -10,9 +10,9 @@ import { getDb } from '@/db';
 import { engagementTasks, profileEditorial, profiles, publications, socialAccounts, sourceItems } from '@/db/schema';
 import { freshToken } from './accounts';
 import { INSTAGRAM_GRAPH } from './instagram';
-import { graphClient, str } from './meta';
+import { graphClient, sameText, str, type GraphCall } from './meta';
 import { THREADS_GRAPH, threadsLength } from './threads';
-import { PublishError } from './types';
+import { PublishError, type Token } from './types';
 
 export class EngagementError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -105,9 +105,22 @@ async function accountOf(owner: string, task: Task) {
   return account;
 }
 
+/** Where a Threads reply container stands: PUBLISHED, FINISHED (ready), IN_PROGRESS, ERROR or EXPIRED. */
+async function threadsReplyState(graph: GraphCall, token: Token, containerId: string) {
+  const body = await graph('GET', `${THREADS_GRAPH}/v1.0/${containerId}`, { fields: 'status,error_message' }, token.accessToken);
+  return { status: str(body.status), error: str(body.error_message) };
+}
+/** The account's own reply under an Instagram comment with one of these texts, if it is there already. */
+async function instagramReplyOf(graph: GraphCall, token: Token, commentId: string, username: string | null, texts: string[]) {
+  const body = await graph('GET', `${INSTAGRAM_GRAPH}/v27.0/${commentId}/replies`, { fields: 'id,text,username,timestamp' }, token.accessToken);
+  const replies = Array.isArray(body.data) ? body.data as Record<string, unknown>[] : [];
+  return replies.find(reply => str(reply.username) === username && texts.some(text => sameText(str(reply.text), text))) || null;
+}
+
 /**
  * The owner's approved answer. Instagram: one call. Threads: a reply container now, its publication by the engine
- * half a minute later. A task already being sent or sent is refused, so an answer never goes out twice.
+ * half a minute later. A task already being sent or sent is refused, and an answer from an earlier press that
+ * may be out (its reply got lost) is looked up first, so an answer never goes out twice.
  */
 export async function sendReply(owner: string, id: string, text: string, { request = fetch, nowMs = Date.now() }: { request?: typeof fetch; nowMs?: number } = {}) {
   const db = getDb();
@@ -121,40 +134,75 @@ export async function sendReply(owner: string, id: string, text: string, { reque
   // The lock: the status changes in one statement, so a second press finds «sending» and stops here.
   const claimed = await db.update(engagementTasks).set({ status: 'sending', reply: answer, error: null, updatedAt: new Date(nowMs).toISOString() }).where(and(eq(engagementTasks.id, id), eq(engagementTasks.status, task.status))).returning({ id: engagementTasks.id });
   if (!claimed.length) throw new EngagementError('На этот комментарий ответ уже отправляется.', 409);
+  const sentEarlier = async (reply: string | null, remoteId: string | null) => {
+    await db.update(engagementTasks).set({ status: 'sent', reply, replyRemoteId: remoteId, error: null, repliedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() }).where(eq(engagementTasks.id, id));
+    return { status: 'sent', already: true };
+  };
+  let writing = false;
   try {
     const token = await freshToken(owner, account, request, nowMs);
     const graph = graphClient(request, 20_000);
     if (account.provider === 'meta_threads') {
+      if (task.replyContainerId) {
+        const container = await threadsReplyState(graph, token, task.replyContainerId);
+        if (container.status === 'PUBLISHED') return await sentEarlier(task.reply, null);
+        // The earlier container with the same words is not out yet: the engine publishes it, no second one is made.
+        if (['FINISHED', 'IN_PROGRESS'].includes(container.status) && task.reply === answer) {
+          await db.update(engagementTasks).set({ updatedAt: new Date(nowMs - THREADS_WAIT_MS).toISOString() }).where(eq(engagementTasks.id, id));
+          return { status: 'sending' };
+        }
+      }
+      // A new container. An older one (other words, failed or expired) is never published.
       const body = await graph('POST', `${THREADS_GRAPH}/v1.0/${token.userId}/threads`, { media_type: 'TEXT', text: answer, reply_to_id: task.remoteId }, token.accessToken);
       if (!str(body.id)) throw new PublishError('Threads не создал ответ.', 'temporary');
       await db.update(engagementTasks).set({ replyContainerId: str(body.id), updatedAt: new Date(nowMs).toISOString() }).where(eq(engagementTasks.id, id));
       return { status: 'sending' };
     }
+    if (task.status === 'failed' && task.reply) {
+      const earlier = await instagramReplyOf(graph, token, task.remoteId, account.username, [task.reply, answer]);
+      if (earlier) return await sentEarlier(str(earlier.text) || task.reply, str(earlier.id) || null);
+    }
+    writing = true;
     const body = await graph('POST', `${INSTAGRAM_GRAPH}/v27.0/${task.remoteId}/replies`, { message: answer }, token.accessToken);
     await db.update(engagementTasks).set({ status: 'sent', replyRemoteId: str(body.id) || null, repliedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() }).where(eq(engagementTasks.id, id));
     return { status: 'sent' };
   } catch (error) {
-    const lost = error instanceof PublishError && error.kind === 'temporary' && error.detail === 'network';
-    const message = lost ? 'Ответ соцсети потерялся: проверьте пост, прежде чем отправлять снова.' : error instanceof Error ? error.message : 'Ответ не отправлен.';
+    // No clear answer to the write: the reply may be out. The next «Отправить» looks for it before sending anything.
+    const lost = writing && error instanceof PublishError && error.kind === 'temporary';
+    const message = lost ? 'Ответ соцсети потерялся. Перед повторной отправкой FERMA проверит, не вышел ли он.' : error instanceof Error ? error.message : 'Ответ не отправлен.';
     await db.update(engagementTasks).set({ status: 'failed', error: message.slice(0, 300), updatedAt: now() }).where(eq(engagementTasks.id, id));
     throw new EngagementError(message, 502);
   }
 }
-/** Threads answers whose container is half a minute old: published now. Called by the engine. */
+/**
+ * Threads answers whose container is half a minute old: published now. Called by the engine. The container is
+ * asked first, so a publication whose answer was lost (or a restart right after it) never posts the reply twice;
+ * without a clear answer the task stays «sending» and is asked again on the next pass.
+ */
 export async function replyTick(owner: string, { request = fetch, nowMs = Date.now() }: { request?: typeof fetch; nowMs?: number } = {}) {
   const db = getDb();
   const due = await db.select().from(engagementTasks).where(and(eq(engagementTasks.owner, owner), eq(engagementTasks.status, 'sending'), isNotNull(engagementTasks.replyContainerId), lte(engagementTasks.updatedAt, new Date(nowMs - THREADS_WAIT_MS).toISOString()))).limit(10);
+  const set = (task: Task, values: Partial<Task>) => db.update(engagementTasks).set({ ...values, updatedAt: new Date(nowMs).toISOString() }).where(and(eq(engagementTasks.id, task.id), eq(engagementTasks.status, 'sending')));
   let sent = 0;
   for (const task of due) {
     try {
       const account = await accountOf(owner, task);
       const token = await freshToken(owner, account, request, nowMs);
-      const body = await graphClient(request, 20_000)('POST', `${THREADS_GRAPH}/v1.0/${token.userId}/threads_publish`, { creation_id: task.replyContainerId }, token.accessToken);
-      await db.update(engagementTasks).set({ status: 'sent', replyRemoteId: str(body.id) || null, repliedAt: new Date(nowMs).toISOString(), updatedAt: new Date(nowMs).toISOString() }).where(eq(engagementTasks.id, task.id));
+      const graph = graphClient(request, 20_000);
+      const container = await threadsReplyState(graph, token, task.replyContainerId!);
+      if (container.status === 'PUBLISHED') { await set(task, { status: 'sent', error: null, repliedAt: new Date(nowMs).toISOString() }); sent++; continue; }
+      if (container.status === 'ERROR' || container.status === 'EXPIRED') {
+        await set(task, { status: 'failed', replyContainerId: null, error: `Ответ не опубликован: ${container.error || (container.status === 'EXPIRED' ? 'контейнер устарел' : 'Threads не принял ответ')}. Можно отправить снова.`.slice(0, 300) });
+        continue;
+      }
+      if (container.status !== 'FINISHED') { await set(task, {}); continue; }
+      const body = await graph('POST', `${THREADS_GRAPH}/v1.0/${token.userId}/threads_publish`, { creation_id: task.replyContainerId }, token.accessToken);
+      await set(task, { status: 'sent', error: null, replyRemoteId: str(body.id) || null, repliedAt: new Date(nowMs).toISOString() });
       sent++;
     } catch (error) {
+      if (error instanceof PublishError && error.retryable) { await set(task, { error: `Ответ ещё не подтверждён (${error.message}). Проверим снова через минуту.`.slice(0, 300) }); continue; }
       const message = error instanceof Error ? error.message : 'Ответ не опубликован.';
-      await db.update(engagementTasks).set({ status: 'failed', error: `Ответ не опубликован: ${message}`.slice(0, 300), updatedAt: now() }).where(eq(engagementTasks.id, task.id));
+      await set(task, { status: 'failed', error: `Ответ не опубликован: ${message}`.slice(0, 300) });
     }
   }
   return { sent };

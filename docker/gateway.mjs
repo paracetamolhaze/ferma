@@ -11,7 +11,10 @@ export function createGateway(upstreamPort = 8787) {
       response.writeHead(403).end('Forbidden host');
       return;
     }
-    if ((request.headers.origin && request.headers.origin !== `http://${host}`) || request.headers['sec-fetch-site'] === 'cross-site') {
+    // One visit from another site is let in: the start page opened as a page. Meta's login sends the owner back
+    // there through the public side (the code rides in the address fragment, read by the page itself).
+    const returning = request.method === 'GET' && request.url === '/' && request.headers['sec-fetch-mode'] === 'navigate' && !request.headers.origin;
+    if ((request.headers.origin && request.headers.origin !== `http://${host}`) || (request.headers['sec-fetch-site'] === 'cross-site' && !returning)) {
       response.writeHead(403).end('Forbidden origin');
       return;
     }

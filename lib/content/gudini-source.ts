@@ -177,7 +177,7 @@ export async function upsertItem(owner: string, source: Source, raw: unknown, fe
   if (existing) {
     writes.push(db.update(sourceItems).set(fields).where(eq(sourceItems.id, id)));
     // Versions made from the previous text are out of date; what is not published yet is withdrawn.
-    writes.push(db.update(contentVariants).set({ status: 'outdated', updatedAt: now() }).where(and(eq(contentVariants.itemId, id), ne(contentVariants.revision, item.revision), inArray(contentVariants.status, ['planned', 'writing', 'rendering', 'review', 'ready', 'rejected', 'failed']))));
+    writes.push(db.update(contentVariants).set({ status: 'outdated', updatedAt: now() }).where(and(eq(contentVariants.itemId, id), ne(contentVariants.revision, item.revision), inArray(contentVariants.status, ['planned', 'writing', 'reviewing', 'written', 'rendering', 'review', 'ready', 'rejected', 'failed']))));
     writes.push(db.update(publications).set({ status: 'cancelled', error: 'Материал изменился в Gudini: будет новая версия.', updatedAt: now() }).where(and(eq(publications.itemId, id), inArray(publications.status, ['draft', 'awaiting_approval', 'scheduled']))));
   } else {
     writes.push(db.insert(sourceItems).values({ id, owner, sourceId: source.id, externalId: item.id, importedAt: now(), ...fields }).onConflictDoNothing());
@@ -306,7 +306,9 @@ export async function retryItem(owner: string, itemId: string) {
 }
 /** The owner can hide a material from distribution (or bring it back). */
 export async function setItemIgnored(owner: string, itemId: string, ignored: boolean) {
-  const changed = await getDb().update(sourceItems).set({ status: ignored ? 'ignored' : 'ready', updatedAt: now() })
+  // Brought back, a material is what it was before: a repeat stays a repeat, one with missing files stays failed.
+  const restored = sql<string>`case when ${sourceItems.duplicateOf} is not null then 'duplicate' when ${sourceItems.assetsStored} < ${sourceItems.assetsTotal} then 'failed' else 'ready' end`;
+  const changed = await getDb().update(sourceItems).set({ status: ignored ? 'ignored' : restored, updatedAt: now() })
     .where(and(eq(sourceItems.id, itemId), eq(sourceItems.owner, owner), inArray(sourceItems.status, ignored ? ['ready', 'failed', 'duplicate'] : ['ignored']))).returning({ id: sourceItems.id });
   if (!changed.length) throw new SourceError('Этот материал сейчас нельзя изменить.', 409);
   return { ok: true };

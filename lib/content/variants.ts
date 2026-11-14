@@ -480,7 +480,7 @@ export async function completeRender(owner: string, jobId: string, files: Render
     db.update(contentVariants).set({
       status: close.length ? 'review' : 'ready', assetsCount: files.length, error: close.length ? 'Обложка почти такая же, как у другой перерисовки этого материала.' : null,
       quality: JSON.stringify({ ...quality, coverLikeOthers: close.length, renderedAt: now() }), updatedAt: now(),
-    }).where(eq(contentVariants.id, variant.id)),
+    }).where(and(eq(contentVariants.id, variant.id), ne(contentVariants.status, 'outdated'))),
     // A publication that was waiting for these cards may go at its time again, without the waiting pause.
     db.update(publications).set({ nextAttemptAt: null, error: null, updatedAt: now() }).where(and(eq(publications.variantId, variant.id), eq(publications.status, 'scheduled'))),
   ] as unknown as Parameters<typeof db.batch>[0]);
@@ -492,7 +492,7 @@ export async function failRender(owner: string, jobId: string, error: string, re
   if (!job) return { finished: true };
   const finished = !retryable || job.attempts >= MAX_RENDERS;
   await db.update(mediaJobs).set({ status: finished ? 'failed' : 'queued', error: error.slice(0, 500), leaseUntil: null, nextAttemptAt: finished ? null : new Date(nowMs + 60_000 * 2 ** job.attempts).toISOString(), updatedAt: now() }).where(eq(mediaJobs.id, jobId));
-  if (finished) await db.update(contentVariants).set({ status: 'review', error: `Карточки не нарисованы: ${error}`.slice(0, 500), updatedAt: now() }).where(eq(contentVariants.id, job.subjectId));
+  if (finished) await db.update(contentVariants).set({ status: 'review', error: `Карточки не нарисованы: ${error}`.slice(0, 500), updatedAt: now() }).where(and(eq(contentVariants.id, job.subjectId), ne(contentVariants.status, 'outdated')));
   return { finished };
 }
 

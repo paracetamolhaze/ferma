@@ -10,7 +10,7 @@ import { getDb } from '@/db';
 import { autopilotItems, campaigns, contentVariants, personas, posts, profiles, publicationEvents, publications, socialAccounts, sourceItems } from '@/db/schema';
 import { cancel as cancelAutopilot } from '../autopilot';
 import { readSettings, saveSettings } from '../content/gudini-source';
-import { variantMedia } from '../content/variants';
+import { approveVariant, variantMedia } from '../content/variants';
 import { AccountError, freshToken } from './accounts';
 import { signedMediaUrl } from './public-media';
 import { adapterFor } from './registry';
@@ -75,7 +75,8 @@ async function fail(owner: string, row: Publication, error: unknown, nowMs: numb
   const retry = known.retryable && attempts < MAX_ATTEMPTS;
   // The network's own wait (Retry-After, usage headers) wins when it is longer than ours.
   const wait = Math.max(retryDelay(attempts), known.retryAfterMs ?? 0);
-  if (known.kind === 'auth') await getDb().update(socialAccounts).set({ status: 'expired', error: known.message, updatedAt: now() }).where(eq(socialAccounts.id, row.accountId));
+  // Only a working account is marked for reconnection: a disabled or removed one stays as the owner left it.
+  if (known.kind === 'auth') await getDb().update(socialAccounts).set({ status: 'expired', error: known.message, updatedAt: now() }).where(and(eq(socialAccounts.id, row.accountId), inArray(socialAccounts.status, ['connected', 'error'])));
   if (known.kind === 'rate_limit') await pauseAccount(row.accountId, nowMs + Math.max(known.retryAfterMs ?? 0, 15 * 60_000));
   await move(row, { status: retry ? 'scheduled' : 'failed', attempts, nextAttemptAt: retry ? iso(nowMs + wait) : null, lockedUntil: null, error: known.message.slice(0, 500), errorKind: known.kind });
   await log(owner, row.id, retry ? 'warn' : 'error', `${known.message}${known.detail ? ` [${known.detail}]` : ''}${retry ? `; повтор через ${Math.round(wait / 60000)} мин (попытка ${attempts} из ${MAX_ATTEMPTS})` : ''}`);
@@ -83,7 +84,7 @@ async function fail(owner: string, row: Publication, error: unknown, nowMs: numb
 
 async function accountOf(row: Publication) {
   const [account] = await getDb().select().from(socialAccounts).where(eq(socialAccounts.id, row.accountId));
-  if (!account || account.status === 'disabled') throw new PublishError('Аккаунт отключён.', 'auth');
+  if (!account || account.status === 'disabled') throw new PublishError('Аккаунт отключён в FERMA.', 'not_available');
   if (account.status === 'expired') throw new PublishError('Доступ к аккаунту истёк. Подключите его заново.', 'auth');
   return account;
 }
@@ -130,26 +131,46 @@ function containersOf(row: Publication): { ids: string[]; at: number } {
   return Array.isArray(parsed) ? { ids: parsed, at: 0 } : { ids: parsed.ids || [], at: Number(parsed.at) || 0 };
 }
 const preparedOf = (row: Publication): Prepared => ({ containerIds: containersOf(row).ids, parentId: row.parentContainerId || '', waitMs: 0 });
-/** Checks the containers and publishes when the network is ready. */
-async function advance(owner: string, row: Publication, request: typeof fetch, nowMs: number) {
+const reasonOf = (error: unknown) => error instanceof Error ? error.message : 'ошибка без описания';
+/** Whether publishing is on right now, read again before anything is sent; and the age limit of news. */
+type Gate = () => Promise<{ publish: boolean; maxAgeHours: number }>;
+/**
+ * Checks the containers and publishes when the network is ready and automatic publishing is on at that moment.
+ * An «uncertain» publication (the post may already be out) is never failed, retried or made again before the
+ * network has answered about its container: on any trouble it waits and is asked again later.
+ */
+async function advance(owner: string, row: Publication, request: typeof fetch, nowMs: number, mayPublish: Gate) {
+  const uncertain = row.status === 'uncertain';
+  // The next look: an uncertain publication waits by nextAttemptAt, a processing one by containerReadyAt.
+  const later = (ms: number, error?: string) => move(row, { ...(uncertain ? { nextAttemptAt: iso(nowMs + ms) } : { containerReadyAt: iso(nowMs + ms) }), ...(error ? { error: error.slice(0, 500) } : {}) });
+  const unsettled = (error: unknown) => `Не сверено с соцсетью: ${reasonOf(error)} Пост мог уже выйти, поэтому заново он не создаётся.`;
   let account;
-  try { account = await accountOf(row); } catch (error) { await fail(owner, row, error, nowMs); return 'failed'; }
+  try { account = await accountOf(row); }
+  catch (error) {
+    if (uncertain) { await later(30 * 60_000, unsettled(error)); return 'later'; }
+    await fail(owner, row, error, nowMs); return 'failed';
+  }
   const paused = pausedUntil(account, nowMs);
-  if (paused) { await move(row, row.status === 'uncertain' ? { nextAttemptAt: iso(paused) } : { containerReadyAt: iso(paused) }); return 'paused'; }
+  if (paused) { await later(paused - nowMs); return 'paused'; }
   const adapter = adapterFor(account.provider as Provider, request);
   let token;
-  try { token = await freshToken(owner, account, request, nowMs); } catch (error) { await fail(owner, row, error, nowMs); return 'failed'; }
+  try { token = await freshToken(owner, account, request, nowMs); }
+  catch (error) {
+    if (uncertain) { await later(15 * 60_000, unsettled(error)); return 'later'; }
+    await fail(owner, row, error, nowMs); return 'failed';
+  }
   let state;
   try { state = await adapter.checkPrepared(token, preparedOf(row)); }
   catch (error) {
+    if (uncertain) { await later(error instanceof PublishError && error.retryable ? 2 * 60_000 : 30 * 60_000, unsettled(error)); return 'later'; }
     if (error instanceof PublishError && !error.retryable) { await fail(owner, row, error, nowMs); return 'failed'; }
-    await move(row, { containerReadyAt: new Date(nowMs + CHECK_EVERY_MS).toISOString() });
+    await later(CHECK_EVERY_MS);
     return 'later';
   }
   if (state.state === 'processing') {
     const since = containersOf(row).at;
     if (row.status === 'processing' && since && nowMs - since > PROCESSING_LIMIT_MS) { await fail(owner, row, new PublishError('Соцсеть слишком долго обрабатывает картинки.', 'temporary'), nowMs); return 'failed'; }
-    await move(row, { containerReadyAt: new Date(nowMs + CHECK_EVERY_MS).toISOString() });
+    await later(CHECK_EVERY_MS);
     return 'later';
   }
   if (state.state === 'failed') { await fail(owner, row, new PublishError(`Соцсеть не обработала публикацию: ${state.error}`, row.attempts + 1 < 3 ? 'temporary' : 'invalid_media'), nowMs); return 'failed'; }
@@ -168,7 +189,19 @@ async function advance(owner: string, row: Publication, request: typeof fetch, n
     await log(owner, row.id, 'warn', 'Контейнер устарел (24 ч), будет создан заново.');
     return 'expired';
   }
-  // Ready: publish. The container id makes a repeat harmless: a published container is refused, not posted twice.
+  // Ready and not published (the container says so). It goes out only while automatic publishing is on right now:
+  // «Остановить всё» may have come during this pass. Held, it waits with the same container.
+  const gate = await mayPublish();
+  if (!gate.publish) {
+    if (!uncertain) return 'held';
+    await move(row, { status: 'processing', nextAttemptAt: null, containerReadyAt: iso(nowMs), lockedUntil: null, error: 'Пост не вышел (контейнер не опубликован). Выйдет из того же контейнера, когда автопубликация снова включена.' });
+    await log(owner, row.id, 'info', 'Сверено с соцсетью: пост не вышел. Ждёт включения автопубликации.');
+    return 'held';
+  }
+  // A publication that waited long (limits, pauses, a retry) does not go out as news once the material is too old.
+  const stale = await staleReason(row, nowMs, gate.maxAgeHours);
+  if (stale) { await move(row, { status: 'cancelled', nextAttemptAt: null, lockedUntil: null, error: stale }); await log(owner, row.id, 'warn', stale); return 'stale'; }
+  // Publish. The container id makes a repeat harmless: a published container is refused, not posted twice.
   const claimed = await move(row, { status: 'publishing', lockedUntil: new Date(nowMs + LOCK_MS).toISOString() });
   if (!claimed) return 'busy';
   try {
@@ -207,17 +240,22 @@ export async function publicationTick(owner: string, { nowMs = Date.now(), reque
   await db.update(publications).set({ status: 'scheduled', lockedUntil: null, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'preparing'), lt(publications.lockedUntil, at)));
   await db.update(publications).set({ status: 'uncertain', lockedUntil: null, nextAttemptAt: at, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'publishing'), lt(publications.lockedUntil, at)));
   const settings = await readSettings(owner);
+  // Read again right before anything is sent: «Остановить всё» may land while this pass is running.
+  const mayPublish: Gate = async () => { const current = await readSettings(owner); return { publish: Boolean(current.autopublish), maxAgeHours: current.maxAgeHours }; };
   const results: Record<string, number> = {};
   const count = (key: string) => { results[key] = (results[key] || 0) + 1; };
-  // Settling an uncertain publication only reads from the network, so it runs even with publishing switched off.
+  // An uncertain publication is settled even with publishing switched off; it is published only while it is on.
   const uncertain = await db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'uncertain'), or(isNull(publications.nextAttemptAt), lte(publications.nextAttemptAt, at)))).limit(PER_TICK);
-  for (const row of uncertain) count(await advance(owner, row, request, nowMs));
+  for (const row of uncertain) count(await advance(owner, row, request, nowMs, mayPublish));
   if (!settings.autopublish) return { off: true, results };
   const processing = await db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'processing'), lte(publications.containerReadyAt, at))).orderBy(asc(publications.containerReadyAt)).limit(PER_TICK);
-  for (const row of processing) count(await advance(owner, row, request, nowMs));
+  for (const row of processing) count(await advance(owner, row, request, nowMs, mayPublish));
   // Urgent news first, then by time.
   const due = await db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'scheduled'), lte(publications.scheduledFor, at), or(isNull(publications.nextAttemptAt), lte(publications.nextAttemptAt, at)))).orderBy(desc(publications.priority), asc(publications.scheduledFor)).limit(PER_TICK);
-  for (const row of due) count(await prepare(owner, row, request, nowMs, settings));
+  for (const row of due) {
+    if (!(await mayPublish()).publish) { count('held'); break; }
+    count(await prepare(owner, row, request, nowMs, settings));
+  }
   return { off: false, results };
 }
 
@@ -247,27 +285,46 @@ async function owned(owner: string, id: string) {
   if (!row) throw new QueueError('Публикация не найдена.', 404);
   return row;
 }
+/**
+ * The owner approves a publication. Its version is approved with it when it waits for the owner too: otherwise
+ * the quality check would hold the publication again a minute later.
+ */
 export async function approve(owner: string, id: string) {
   const row = await owned(owner, id);
   if (!['awaiting_approval', 'draft'].includes(row.status)) throw new QueueError('Одобрить можно только черновик или публикацию на проверке.', 409);
+  const [variant] = await getDb().select({ status: contentVariants.status }).from(contentVariants).where(eq(contentVariants.id, row.variantId));
+  if (!variant || variant.status === 'outdated') throw new QueueError('Материал изменился в Gudini: эта версия устарела.', 409);
+  if (['rejected', 'failed', 'archived'].includes(variant.status)) throw new QueueError('Версия этой публикации отклонена или не получилась: исправьте её в «Вариантах».', 409);
+  if (variant.status === 'review') await approveVariant(owner, row.variantId);
   const next = await move(row, { status: 'scheduled', approvedAt: now(), error: null });
   if (!next) throw new QueueError('Публикация изменилась, обновите страницу.', 409);
-  await log(owner, id, 'info', 'Одобрено владельцем.');
+  await log(owner, id, 'info', variant.status === 'review' ? 'Одобрено владельцем вместе с версией.' : 'Одобрено владельцем.');
   return { ok: true };
 }
+/** An uncertain publication can be cancelled too: FERMA stops asking about it and never publishes it. */
 export async function cancelPublication(owner: string, id: string) {
   const row = await owned(owner, id);
-  if (!['draft', 'awaiting_approval', 'scheduled', 'failed', 'processing'].includes(row.status)) throw new QueueError('Эту публикацию уже нельзя отменить.', 409);
-  const next = await move(row, { status: 'cancelled', lockedUntil: null });
+  if (!['draft', 'awaiting_approval', 'scheduled', 'failed', 'processing', 'uncertain'].includes(row.status)) throw new QueueError('Эту публикацию уже нельзя отменить.', 409);
+  const next = await move(row, { status: 'cancelled', lockedUntil: null, ...(row.status === 'uncertain' ? { error: 'Отменено до сверки: пост мог уже выйти, проверьте в соцсети.' } : {}) });
   if (!next) throw new QueueError('Публикация изменилась, обновите страницу.', 409);
-  await log(owner, id, 'info', 'Отменено владельцем.');
+  await log(owner, id, 'info', row.status === 'uncertain' ? 'Отменено владельцем до сверки с соцсетью.' : 'Отменено владельцем.');
   return { ok: true };
 }
+/**
+ * «Повторить». When containers were already made, the network is asked about them first (the post may be out):
+ * a published one is recorded, a ready one is published from the same container, nothing is made twice.
+ */
 export async function retryPublication(owner: string, id: string) {
   const row = await owned(owner, id);
   if (row.status !== 'failed') throw new QueueError('Повторить можно только публикацию с ошибкой.', 409);
-  await move(row, { status: 'scheduled', attempts: 0, nextAttemptAt: null, error: null, errorKind: null, containerIds: null, parentContainerId: null, containerReadyAt: null });
-  await log(owner, id, 'info', 'Повтор по кнопке владельца.');
+  const [account] = await getDb().select({ status: socialAccounts.status }).from(socialAccounts).where(eq(socialAccounts.id, row.accountId));
+  if (!account || ['disabled', 'expired'].includes(account.status)) throw new QueueError('Аккаунт не подключён: сначала подключите его в «Аккаунтах».', 409);
+  const settle = Boolean(row.parentContainerId);
+  const next = await move(row, settle
+    ? { status: 'uncertain', attempts: 0, nextAttemptAt: null, lockedUntil: null, error: 'Повтор: сначала сверяем с соцсетью, не вышел ли пост.', errorKind: null }
+    : { status: 'scheduled', attempts: 0, nextAttemptAt: null, error: null, errorKind: null, containerIds: null, parentContainerId: null, containerReadyAt: null });
+  if (!next) throw new QueueError('Публикация изменилась, обновите страницу.', 409);
+  await log(owner, id, 'info', settle ? 'Повтор по кнопке владельца: сначала сверка с соцсетью.' : 'Повтор по кнопке владельца.');
   return { ok: true };
 }
 export async function reschedule(owner: string, id: string, at: string, nowMs = Date.now()) {

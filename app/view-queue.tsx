@@ -113,7 +113,7 @@ function FermaQueue({ ctx }: { ctx: Ctx }) {
           {['awaiting_approval', 'draft'].includes(row.status) && <button className="ghost small" onClick={() => void act(row.id, { action: 'approve', id: row.id }, 'Одобрено.')}><Check size={14} />Одобрить</button>}
           {['awaiting_approval', 'draft', 'scheduled'].includes(row.status) && <button className="icon-button" title="Другое время" aria-label="Другое время" onClick={() => setMoving(row)}><CalendarClock size={15} /></button>}
           {row.status === 'failed' && <button className="ghost small" onClick={() => void act(row.id, { action: 'retry', id: row.id }, 'Поставлено на повтор.')}><RotateCcw size={14} />Повторить</button>}
-          {['draft', 'awaiting_approval', 'scheduled', 'failed', 'processing'].includes(row.status) && <button className="icon-button" title="Отменить" aria-label="Отменить" onClick={() => void act(row.id, { action: 'cancel', id: row.id }, 'Отменено.')}><X size={15} /></button>}
+          {['draft', 'awaiting_approval', 'scheduled', 'failed', 'processing', 'uncertain'].includes(row.status) && <button className="icon-button" title="Отменить" aria-label="Отменить" onClick={() => { if (row.status !== 'uncertain' || confirm('Пост мог уже выйти. FERMA перестанет сверять его с соцсетью и не опубликует. Отменить?')) void act(row.id, { action: 'cancel', id: row.id }, 'Отменено.'); }}><X size={15} /></button>}
           <button className="icon-button" title="История" aria-label="История" onClick={() => setEvents(row.id)}><Eye size={15} /></button>
           {row.permalink && <a className="icon-button" href={row.permalink} target="_blank" rel="noreferrer" title="Открыть пост" aria-label="Открыть пост"><ExternalLink size={15} /></a>}
         </td>

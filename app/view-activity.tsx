@@ -22,6 +22,12 @@ const LIMITS: Record<string, number> = { threads: 500, instagram: 2200 };
 
 function TaskCard({ ctx, task, onChanged }: { ctx: Ctx; task: Task; onChanged: () => void }) {
   const [text, setText] = useState(task.reply || task.suggestion || '');
+  // The AI's draft can arrive while the card is on screen: it fills the answer unless the owner has typed one.
+  const [draft, setDraft] = useState(task.suggestion);
+  if (task.suggestion !== draft) {
+    setDraft(task.suggestion);
+    if (!text.trim() && task.suggestion) setText(task.suggestion);
+  }
   const action = useAction(ctx);
   const open = ['new', 'suggested', 'failed'].includes(task.status);
   const limit = LIMITS[task.platform || 'threads'];
@@ -33,7 +39,11 @@ function TaskCard({ ctx, task, onChanged }: { ctx: Ctx; task: Task; onChanged: (
       {task.status === 'sent' && task.reply && <small className="wrap">Ваш ответ: {task.reply}</small>}
       {task.error && <small className={task.status === 'failed' ? 'error-text' : 'muted'}>{task.error}</small>}
     </div>
-    {open && <form className="form-stack" onSubmit={event => { event.preventDefault(); void action.run('send', async () => { await send('/api/activity', { action: 'send', id: task.id, text }); onChanged(); }, task.platform === 'threads' ? 'Ответ создан, через полминуты он выйдет в Threads.' : 'Ответ отправлен.'); }}>
+    {open && <form className="form-stack" onSubmit={event => { event.preventDefault(); void action.run('send', async () => {
+      const result = await send<{ status: string; already?: boolean }>('/api/activity', { action: 'send', id: task.id, text });
+      onChanged();
+      ctx.notify(result.already ? 'Прошлый ответ уже вышел, второй раз он не отправлен.' : result.status === 'sending' ? 'Ответ создан, через полминуты он выйдет в Threads.' : 'Ответ отправлен.');
+    }); }}>
       <label>Ответ<textarea rows={3} maxLength={limit} value={text} placeholder={task.status === 'new' ? 'ИИ ещё не предложил ответ. Можно написать свой.' : 'Напишите ответ'} onChange={event => setText(event.target.value)} /></label>
       <span className="field-row"><small className="muted">{text.length} из {limit}</small><span className="grow" />
         <button type="button" className="ghost small" disabled={Boolean(action.busy)} onClick={() => void action.run('ignore', async () => { await send('/api/activity', { action: 'ignore', id: task.id }); onChanged(); })}><X size={14} />Без ответа</button>

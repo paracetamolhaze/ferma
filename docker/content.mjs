@@ -353,14 +353,14 @@ async function pass() {
   if (now - lastMediaHealth > 60_000) {
     lastMediaHealth = now;
     try { const health = await media('/health', undefined, 5_000); await content({ action: 'heartbeat', name: 'media', ok: true, note: `занят: ${health.running}, ждут: ${health.waiting}, свободно памяти ${health.freeMemoryMb} МБ`, details: health }); }
-    catch (error) { await content({ action: 'heartbeat', name: 'media', ok: false, note: error.message, details: null }).catch(() => undefined); }
+    catch (error) { await content({ action: 'heartbeat', name: 'media', ok: false, note: String(error.message).slice(0, 500), details: null }).catch(() => undefined); }
   }
   // Healthy = no error during the last five minutes; the latest error stays visible for a while either way.
   // Every heartbeat is a database write: once a minute, or at once when health or the resource mode changes.
   const healthy = Date.now() - lastErrorAt > 5 * 60_000;
   if (now - lastBeat.at > 60_000 || healthy !== lastBeat.ok || state.resources.mode !== lastBeat.mode) {
     lastBeat = { at: now, ok: healthy, mode: state.resources.mode };
-    await content({ action: 'heartbeat', name: 'engine', ok: healthy, note: healthy ? null : state.errors[0] ? `${state.errors[0].step}: ${state.errors[0].message}` : null, details: state }).catch(() => undefined);
+    await content({ action: 'heartbeat', name: 'engine', ok: healthy, note: healthy ? null : state.errors[0] ? `${state.errors[0].step}: ${state.errors[0].message}`.slice(0, 500) : null, details: state }).catch(() => undefined);
   }
 }
 
