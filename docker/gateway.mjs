@@ -2,7 +2,8 @@ import http from 'node:http';
 
 // This gateway is only for the loopback-published, single-owner Docker project.
 // Never trust incoming Sites identity headers or arbitrary Host/Origin values.
-const allowedHosts = new Set(['localhost:3100', '127.0.0.1:3100']);
+// FERMA_HOSTS is only for a second, isolated copy on other ports (tests); the normal project keeps these two.
+const allowedHosts = new Set((process.env.FERMA_HOSTS || 'localhost:3100,127.0.0.1:3100').split(',').map(host => host.trim()).filter(Boolean));
 export function createGateway(upstreamPort = 8787) {
   return http.createServer((request, response) => {
     const host = request.headers.host;
@@ -33,5 +34,37 @@ export function createGateway(upstreamPort = 8787) {
     request.on('aborted', () => upstream.destroy());
     response.on('close', () => { if (!response.writableEnded) upstream.destroy(); });
     request.pipe(upstream);
+  });
+}
+
+/**
+ * The public side, reached only through the owner's Caddy (HTTPS). Two things, nothing else:
+ *   GET /m/<signed token>          one picture for Threads/Instagram to fetch, checked by the app
+ *   GET /oauth/<threads|instagram> the network's return after login: sent on to this computer's FERMA page
+ * No identity is attached: the app answers /api/public-media without a user and only for valid signatures.
+ */
+export function createPublicGateway(upstreamPort = 8787, localOrigin = 'http://localhost:3100') {
+  return http.createServer((request, response) => {
+    const url = new URL(request.url || '/', 'http://public');
+    if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
+    const oauth = /^\/oauth\/(threads|instagram)$/.exec(url.pathname);
+    if (oauth) {
+      // The code goes into the address fragment: it is read by the page on this computer, not logged by servers.
+      const fields = new URLSearchParams({ provider: oauth[1] });
+      for (const name of ['code', 'state', 'error', 'error_description']) if (url.searchParams.get(name)) fields.set(name, url.searchParams.get(name).slice(0, 2000));
+      response.writeHead(302, { Location: `${localOrigin}/#accounts/oauth?${fields}`, 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' });
+      response.end();
+      return;
+    }
+    const media = /^\/m\/([A-Za-z0-9_.-]{20,800})$/.exec(url.pathname);
+    if (!media) { response.writeHead(404, { 'Cache-Control': 'no-store' }).end('Not found'); return; }
+    const upstream = http.request({ hostname: '127.0.0.1', port: upstreamPort, path: `/api/public-media?t=${encodeURIComponent(media[1])}`, method: request.method, headers: { host: `127.0.0.1:${upstreamPort}`, accept: 'image/*' } }, result => {
+      const headers = { 'Content-Type': result.headers['content-type'] || 'application/octet-stream', 'Cache-Control': result.headers['cache-control'] || 'no-store', 'X-Content-Type-Options': 'nosniff' };
+      if (result.headers['content-length']) headers['Content-Length'] = result.headers['content-length'];
+      response.writeHead(result.statusCode === 200 ? 200 : 404, headers);
+      if (result.statusCode === 200) result.pipe(response); else { result.resume(); response.end(); }
+    });
+    upstream.on('error', () => { if (!response.headersSent) response.writeHead(503); response.end(); });
+    upstream.end();
   });
 }

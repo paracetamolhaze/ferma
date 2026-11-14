@@ -18,3 +18,4 @@ work
 coverage
 *.tsbuildinfo
 npm-debug.log*
+media-worker

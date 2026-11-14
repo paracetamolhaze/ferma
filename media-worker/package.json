@@ -1,0 +1,8 @@
+{
+  "name": "ferma-media-worker",
+  "private": true,
+  "type": "module",
+  "description": "Checks finished pictures for FERMA: format, size, hashes, signs of a bad render (sharp/libvips)",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "sharp": "0.35.4" }
+}

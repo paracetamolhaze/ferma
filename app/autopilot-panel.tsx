@@ -34,7 +34,7 @@ function RhythmForm({ profileId, rhythm, tgChannel, onSaved }: { profileId: stri
   return <form className="rhythm-form" onSubmit={save}>
     {RHYTHM_ROWS.filter(([kind]) => values[kind]).map(([kind, label]) => {
       const value = values[kind];
-      if (kind === 'threads' && tgChannel) return <div className="rhythm-row" key={kind}><span>{label}</span><span className="muted">берутся из канала @{tgChannel}, сразу после выхода</span></div>;
+      if (kind === 'threads' && tgChannel) return <div className="rhythm-row" key={kind}><span>{label}</span><span className="muted">из канала @{tgChannel}, сразу после выхода</span></div>;
       return <div className="rhythm-row" key={kind}>
         <span>{label}</span>
         <select value={value.mode} disabled={saving} aria-label={`${label}: как часто`} onChange={event => change(kind, { mode: event.target.value as Draft['mode'] })}>
@@ -57,6 +57,8 @@ export function AutopilotPanel({ profile }: { profile: Profile; ctx: Ctx }) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [checkedAt, setCheckedAt] = useState(0);
+  const [showStock, setShowStock] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
   const load = () => requestJson<State>(`/api/autopilot?profileId=${profile.id}`).then(data => { setState(data); setCheckedAt(Date.now()); }).catch(failure => setError(failure.message));
   useEffect(() => {
     // The plan changes on its own, so the page follows it.
@@ -114,8 +116,10 @@ export function AutopilotPanel({ profile }: { profile: Profile; ctx: Ctx }) {
         <header className="panel-head"><h2>Дальше по плану</h2></header>
         {upcoming.length ? <ul className="plain-list autopilot-list">{upcoming.map(row)}</ul> : <div className="panel-body"><p className="muted">{state.enabled ? 'Движок скоро составит план.' : 'Включите автопилот.'}</p></div>}
       </section>
-      {stock.length > 0 && <section className="panel"><header className="panel-head"><h2>Запас: выйдет по ритму</h2></header><ul className="plain-list autopilot-list">{stock.map(row)}</ul></section>}
-      {history.length > 0 && <section className="panel"><header className="panel-head"><h2>История</h2></header><ul className="plain-list autopilot-list">{history.map(row)}</ul></section>}
+      {stock.length > 0 && <section className="panel"><header className="panel-head"><h2>Запас: выйдет по регулярности</h2><span className="muted">{stock.length}</span></header><ul className="plain-list autopilot-list">{(showStock ? stock : stock.slice(0, 5)).map(row)}</ul>
+        {stock.length > 5 && <div className="panel-note"><button className="link" onClick={() => setShowStock(value => !value)}>{showStock ? 'Свернуть' : `Показать весь запас (${stock.length})`}</button></div>}</section>}
+      {history.length > 0 && <section className="panel"><header className="panel-head"><h2>История</h2></header><ul className="plain-list autopilot-list">{(showHistory ? history : history.slice(0, 10)).map(row)}</ul>
+        {history.length > 10 && <div className="panel-note"><button className="link" onClick={() => setShowHistory(value => !value)}>{showHistory ? 'Свернуть' : `Показать всю историю (${history.length})`}</button></div>}</section>}
     </div>
     <section className="panel">
       <header className="panel-head"><h2>Личность</h2></header>
@@ -125,7 +129,6 @@ export function AutopilotPanel({ profile }: { profile: Profile; ctx: Ctx }) {
         {Array.isArray(persona.interests) && <p><span className="muted">Интересы:</span> {persona.interests.join(', ')}</p>}
         {persona.voice && <p><span className="muted">Как пишет:</span> {String(persona.voice)}</p>}
         {persona.visual && <p><span className="muted">Фото:</span> {String(persona.visual)}</p>}
-        <p className="muted small-note">Ритм: {persona.rhythm ? String(persona.rhythmNote) : 'Threads раз в 2–3 дня вечером, сторис раз в 1–2 дня утром или вечером, пост в Instagram раз в 25–45 дней на выходных.'} Точное время каждый раз выбирается случайно.</p>
       </div>
     </section>
   </div>;

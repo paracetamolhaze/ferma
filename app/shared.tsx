@@ -28,11 +28,17 @@ export type Ctx = {
 };
 
 export const statusNames: Record<string, string> = {
-  draft: 'Черновик', sending: 'Отправляется', uncertain: 'Нужна проверка', scheduled: 'Запланировано', publishing: 'Публикуется',
-  pending_approval: 'Ждёт одобрения', published: 'Опубликовано', failed: 'Ошибка', partial: 'Частично', processing: 'В обработке',
+  draft: 'Черновик', sending: 'Отправляется', uncertain: 'Сверяем с соцсетью', scheduled: 'Запланировано', publishing: 'Публикуется',
+  pending_approval: 'Ждёт одобрения', published: 'Опубликовано', failed: 'Ошибка', partial: 'Частично', processing: 'Соцсеть обрабатывает',
   cancelled: 'Отменено', external: 'В прежнем кабинете',
+  importing: 'Загружается', ready: 'Готово', duplicate: 'Повтор', ignored: 'Скрыт', planned: 'Ждёт текста', writing: 'Пишется', reviewing: 'Читает редактор', written: 'Ждёт аккаунта',
+  rendering: 'Рисуется', review: 'Ждёт вашей проверки', rejected: 'Отклонён', outdated: 'Устарел', archived: 'В архиве', awaiting_approval: 'Ждёт одобрения', preparing: 'Готовится',
+  connected: 'Подключён', expired: 'Нужен вход', disabled: 'Отключён', active: 'Работает', paused: 'На паузе', ok: 'В порядке', error: 'Ошибка', syncing: 'Синхронизация',
+  idle: 'Ожидание', stored: 'Сохранён', deferred: 'Позже', skipped: 'Пропущен', queued: 'В очереди', running: 'Идёт', done: 'Готово',
 };
 export const problemStatuses = ['failed', 'uncertain', 'partial', 'external'];
+const attentionStatuses = ['review', 'expired', 'error', 'rejected', 'awaiting_approval'];
+const goodStatuses = ['published', 'ready', 'connected', 'active', 'ok', 'stored', 'done'];
 const zone = 'Asia/Qyzylorda';
 export const formatDate = (value: string) => new Date(value).toLocaleString('ru-RU', { timeZone: zone, day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
 export const formatTime = (seconds: number) => new Date(seconds * 1000).toLocaleString('ru-RU', { timeZone: zone, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -52,7 +58,7 @@ export function Avatar({ profile, size }: { profile: Pick<Profile, 'name' | 'col
   return <span className={`avatar ${size || ''}`} style={{ background: profile.color, color: colorText(profile.color) }}>{profile.name.slice(0, 2).toUpperCase()}</span>;
 }
 export function StatusPill({ status }: { status: string }) {
-  const tone = status === 'published' ? 'good' : problemStatuses.includes(status) ? 'bad' : status === 'draft' || status === 'cancelled' ? 'plain' : 'info';
+  const tone = goodStatuses.includes(status) ? 'good' : problemStatuses.includes(status) || attentionStatuses.includes(status) ? 'bad' : ['draft', 'cancelled', 'paused', 'disabled', 'outdated', 'archived', 'ignored', 'duplicate', 'idle', 'skipped', 'deferred'].includes(status) ? 'plain' : 'info';
   return <span className={`pill ${tone}`}>{statusNames[status] || status}</span>;
 }
 export function CopyButton({ value, label, onCopied }: { value: string; label?: string; onCopied?: () => void }) {

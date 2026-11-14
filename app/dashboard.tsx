@@ -1,27 +1,44 @@
 "use client";
 import { useEffect, useRef, useState } from 'react';
-import { AlertCircle, BarChart3, CalendarDays, Check, FolderOpen, LayoutDashboard, ListOrdered, Loader2, Mail, Plus, RefreshCw, Settings2, UploadCloud, Users, Video, X } from 'lucide-react';
+import { Activity as ActivityIcon, AlertCircle, AtSign, BarChart3, CalendarDays, Check, FolderOpen, Inbox, Layers, LayoutDashboard, ListOrdered, Loader2, Mail, Megaphone, MessageCircle, Plus, RefreshCw, Settings2, UploadCloud, Users, Video, X } from 'lucide-react';
 import { requestJson } from '@/lib/client-api';
 import { MAX_UPLOAD, missingNetworks, NETWORKS, validateTargets } from '@/lib/domain';
 import type { ProfileQueue, RemotePost } from '@/lib/zernio-insights';
 import AddProfile from './add-profile';
 import MailSettingsForm from './mail-settings-form';
 import { Avatar, connectedNetworks, Empty, formatDate, initialState, Modal, needsSetup, Network, networkName, problemStatuses, useZernio, type Ctx, type Media, type Post, type State } from './shared';
-import { BulkModal, PostsPanel, QueueOverview } from './view-posts';
+import { BulkModal } from './view-posts';
 import { CodeRows, ProfilePage, ProfilesView, useRecentCodes } from './view-profiles';
 import { SmsSettings, UnmatchedSms } from './sms-panels';
 import { FivesimSettings } from './access-panels';
 import { StatsPanel } from './view-stats';
+import { useApi } from './content-ui';
+import { ContentSettings } from './content-settings';
+import { AccountsView } from './view-accounts';
+import { ActivityView } from './view-activity';
+import { FermaAnalytics } from './view-analytics';
+import { CampaignsView } from './view-campaigns';
+import { PublicationsView } from './view-queue';
+import { SourcesView } from './view-sources';
+import { SystemView } from './view-system';
+import { VariantsView } from './view-variants';
 
 const NAV = [
   { id: 'overview', icon: LayoutDashboard, text: 'Обзор' },
   { id: 'profiles', icon: Users, text: 'Профили' },
-  { id: 'mail', icon: Mail, text: 'Почта, СМС и коды' },
+  { id: 'sources', icon: Inbox, text: 'Источники' },
+  { id: 'variants', icon: Layers, text: 'Варианты' },
+  { id: 'campaigns', icon: Megaphone, text: 'Кампании' },
   { id: 'posts', icon: CalendarDays, text: 'Публикации' },
+  { id: 'accounts', icon: AtSign, text: 'Аккаунты' },
+  { id: 'activity', icon: MessageCircle, text: 'Активность' },
   { id: 'stats', icon: BarChart3, text: 'Статистика' },
+  { id: 'mail', icon: Mail, text: 'Почта, СМС и коды' },
   { id: 'library', icon: FolderOpen, text: 'Медиатека' },
 ];
-const TITLES: Record<string, string> = { overview: 'Обзор', profiles: 'Профили', mail: 'Почта, СМС и коды', posts: 'Публикации', stats: 'Статистика', library: 'Медиатека', settings: 'Настройки' };
+const TITLES: Record<string, string> = { overview: 'Обзор', profiles: 'Профили', sources: 'Источники', variants: 'Варианты', campaigns: 'Кампании', accounts: 'Аккаунты', activity: 'Активность', mail: 'Почта, СМС и коды', posts: 'Публикации', stats: 'Статистика', library: 'Медиатека', system: 'Состояние системы', settings: 'Настройки' };
+type OverviewQueue = { rows: { source: string; id: string; profileId: string; platform: string; account: string | null; status: string; at: string; title: string; text: string }[] };
+type OverviewSystem = { counts: { publications: Record<string, number> }; problems: Record<string, unknown[]> };
 const sizeText = (size: number) => size < 1024 ? `${size} Б` : size < 1048576 ? `${(size / 1024).toFixed(1)} КБ` : `${(size / 1048576).toFixed(1)} МБ`;
 
 function Overview({ ctx }: { ctx: Ctx }) {
@@ -30,18 +47,26 @@ function Overview({ ctx }: { ctx: Ctx }) {
   const scheduled = useZernio<{ posts: RemotePost[]; total: number }>(withKey, 'view=posts&status=scheduled');
   const failed = useZernio<{ posts: RemotePost[]; total: number }>(withKey, 'view=posts&status=failed');
   const codes = useRecentCodes(state);
-  const upcoming = Object.entries(scheduled).flatMap(([id, item]) => (item.data?.posts || []).map(post => ({ ...post, profileId: id }))).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
-  const loadingScheduled = Object.values(scheduled).some(item => item.loading);
+  const queue = useApi<OverviewQueue>('/api/publications', 60000);
+  const system = useApi<OverviewSystem>('/api/system', 60000);
+  const activity = useApi<{ waiting: number }>('/api/activity', 60000);
+  // FERMA's own scheduled posts and the Zernio ones, by time.
+  const zernioUpcoming = Object.entries(scheduled).flatMap(([id, item]) => (item.data?.posts || []).map(post => ({ key: `z:${post.id}`, profileId: id, title: post.title || post.content || (post.media === 'video' ? 'Видео без подписи' : post.media ? 'Фото без подписи' : 'Без текста'), platforms: post.platforms.map(entry => entry.platform), at: post.at, via: 'Zernio' })));
+  const fermaUpcoming = (queue.data?.rows || []).filter(row => row.source === 'ferma' && ['scheduled', 'awaiting_approval'].includes(row.status)).map(row => ({ key: `f:${row.id}`, profileId: row.profileId, title: row.title || row.text.slice(0, 80) || 'Публикация', platforms: [row.platform], at: row.at, via: row.status === 'awaiting_approval' ? 'FERMA, ждёт одобрения' : 'FERMA' }));
+  const upcoming = [...zernioUpcoming, ...fermaUpcoming].filter(post => post.at).sort((a, b) => (a.at || '').localeCompare(b.at || ''));
+  const loadingScheduled = Object.values(scheduled).some(item => item.loading) || queue.loading && !queue.data;
   const remoteProblems = Object.values(failed).reduce((total, item) => total + (item.data?.total || 0), 0);
   const localProblems = state.posts.filter(post => problemStatuses.includes(post.status) && !post.zernioId).length;
+  const fermaCounts = system.data?.counts.publications || {};
+  const systemProblems = system.data ? Object.values(system.data.problems).reduce((total, list) => total + list.length, 0) : null;
   const setup = state.profiles.filter(profile => needsSetup(profile, state));
-  const socials = state.channels.filter(channel => channel.state === 'connected').length;
   const tiles = [
     { label: 'Профили', value: state.profiles.length, note: setup.length ? `настроить: ${setup.length}` : 'все настроены', go: 'profiles' },
-    { label: 'Соцсети', value: socials, note: 'подключено', go: 'profiles' },
-    { label: 'Запланировано', value: loadingScheduled ? '…' : upcoming.length, note: 'в Zernio', go: 'posts' },
-    { label: 'Ошибки', value: remoteProblems + localProblems, note: 'публикаций', go: 'posts' },
-    { label: 'Черновики', value: state.posts.filter(post => post.status === 'draft').length, note: 'ждут времени', go: 'posts' },
+    { label: 'Ждут одобрения', value: system.data ? fermaCounts.awaiting_approval || 0 : '…', note: 'публикации FERMA', go: 'posts' },
+    { label: 'Запланировано', value: loadingScheduled ? '…' : upcoming.length, note: `FERMA: ${fermaUpcoming.length}, Zernio: ${zernioUpcoming.length}`, go: 'posts' },
+    { label: 'Ошибки публикаций', value: remoteProblems + localProblems + (fermaCounts.failed || 0), note: `FERMA: ${fermaCounts.failed || 0}, Zernio: ${remoteProblems + localProblems}`, go: 'posts' },
+    { label: 'Комментарии', value: activity.data ? activity.data.waiting : '…', note: 'ждут ответа', go: 'activity' },
+    { label: 'Система', value: systemProblems === null ? '…' : systemProblems ? `сбоев: ${systemProblems}` : 'в порядке', note: 'процессы и очереди', go: 'system' },
   ];
   if (!state.profiles.length) return <Empty title="Начните с первого профиля" text="Название, ключ Zernio и адрес почты вводятся в одной форме." action={<button className="primary" onClick={ctx.addProfile}><Plus size={16} />Новый профиль</button>} />;
   return <div className="stack">
@@ -58,12 +83,12 @@ function Overview({ ctx }: { ctx: Ctx }) {
         <header className="panel-head"><h2>Ближайшие публикации</h2><button className="link" onClick={() => ctx.go('posts')}>Все</button></header>
         {upcoming.length ? <ul className="plain-list">{upcoming.slice(0, 6).map(post => {
           const profile = state.profiles.find(item => item.id === post.profileId);
-          return <li key={post.id}>
-            <span className="post-text"><strong>{post.title || post.content || 'Без названия'}</strong><small>{profile?.name}</small></span>
-            <span className="networks">{post.platforms.map(item => <Network key={item.platform} platform={item.platform} />)}</span>
+          return <li key={post.key}>
+            <span className="post-text"><strong>{post.title}</strong><small>{[profile?.name, post.via].filter(Boolean).join(' · ')}</small></span>
+            <span className="networks">{post.platforms.map(platform => <Network key={platform} platform={platform} />)}</span>
             <time>{post.at ? formatDate(post.at) : '—'}</time>
           </li>;
-        })}</ul> : <div className="panel-body"><p className="muted">{loadingScheduled ? 'Загружаем…' : withKey.length ? 'Ничего не запланировано.' : 'Нужен ключ Zernio хотя бы у одного профиля.'}</p></div>}
+        })}</ul> : <div className="panel-body"><p className="muted">{loadingScheduled ? 'Загружаем…' : 'Ничего не запланировано.'}</p></div>}
       </section>
     </div>
     {setup.length > 0 && <section className="panel">
@@ -115,6 +140,7 @@ function Library({ ctx, upload, uploadActive, pick, onPreview }: { ctx: Ctx; upl
 function Settings({ ctx }: { ctx: Ctx }) {
   const { state } = ctx;
   return <div className="columns">
+    <ContentSettings ctx={ctx} />
     <section className="panel">
       <header className="panel-head"><h2>Почта (MailClaw)</h2><span className={`pill ${state.mail ? 'good' : 'plain'}`}>{state.mail ? 'Подключена' : 'Не подключена'}</span></header>
       <div className="panel-body"><MailSettingsForm key={state.mail ? `${state.mail.baseUrl} ${state.mail.domain}` : 'new'} mail={state.mail} canSave={state.canSaveKey} onSaved={ctx.reload} /></div>
@@ -250,7 +276,6 @@ export default function Home() {
   const activeNav = onProfile ? 'profiles' : section;
   const withKey = state.profiles.filter(profile => profile.configured);
   const headerAction = section === 'profiles' ? <button className="primary" onClick={ctx.addProfile}><Plus size={16} />Новый профиль</button>
-    : section === 'posts' ? <div className="panel-actions"><button className="ghost" onClick={() => ctx.bulk()}><UploadCloud size={16} />Пачку в очередь</button><button className="primary" onClick={() => compose()}><Plus size={16} />Новая публикация</button></div>
     : section === 'library' ? <button className="primary" disabled={uploadActive} onClick={() => fileRef.current?.click()}><UploadCloud size={16} />Загрузить файлы</button>
     : section === 'overview' ? <button className="ghost" disabled={busy || !withKey.length} onClick={() => run(async () => { await post({ action: 'sync' }); await reload(); setNotice('Соцсети и статусы обновлены.'); })}>{busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}Обновить из Zernio</button> : null;
   let scheduleIssue = '';
@@ -271,7 +296,7 @@ export default function Home() {
       <nav aria-label="Основная навигация">{NAV.map(item => <button key={item.id} aria-current={activeNav === item.id ? 'page' : undefined} onClick={() => go(item.id)}><item.icon size={17} />{item.text}</button>)}</nav>
       <div className="rail-foot">
         <button className="rail-add" onClick={ctx.addProfile}><Plus size={16} />Новый профиль</button>
-        <nav aria-label="Настройки"><button aria-current={section === 'settings' ? 'page' : undefined} onClick={() => go('settings')}><Settings2 size={17} />Настройки</button></nav>
+        <nav aria-label="Настройки"><button aria-current={section === 'system' ? 'page' : undefined} onClick={() => go('system')}><ActivityIcon size={17} />Состояние системы</button><button aria-current={section === 'settings' ? 'page' : undefined} onClick={() => go('settings')}><Settings2 size={17} />Настройки</button></nav>
       </div>
     </aside>
     <main id="main">
@@ -285,8 +310,14 @@ export default function Home() {
         {section === 'profiles' && <ProfilesView ctx={ctx} />}
         {onProfile && <ProfilePage key={routeId} ctx={ctx} id={routeId} tab={routeTab} />}
         {section === 'mail' && <MailView ctx={ctx} />}
-        {section === 'posts' && <div className="stack"><QueueOverview ctx={ctx} profiles={withKey} />{state.profiles.length ? <PostsPanel ctx={ctx} profiles={state.profiles} /> : <Empty title="Сначала создайте профиль" action={<button className="primary" onClick={ctx.addProfile}><Plus size={16} />Новый профиль</button>} />}</div>}
-        {section === 'stats' && <StatsPanel ctx={ctx} profiles={withKey} />}
+        {section === 'sources' && <SourcesView ctx={ctx} />}
+        {section === 'variants' && <VariantsView key={routeId || 'all'} ctx={ctx} itemId={routeId} />}
+        {section === 'campaigns' && <CampaignsView ctx={ctx} />}
+        {section === 'accounts' && <AccountsView ctx={ctx} />}
+        {section === 'activity' && <ActivityView ctx={ctx} />}
+        {section === 'posts' && <PublicationsView ctx={ctx} />}
+        {section === 'stats' && <div className="stack"><FermaAnalytics ctx={ctx} /><h2 className="section-heading">Zernio</h2><StatsPanel ctx={ctx} profiles={withKey} /></div>}
+        {section === 'system' && <SystemView ctx={ctx} />}
         {section === 'library' && <Library ctx={ctx} upload={files => void uploadFiles(files)} uploadActive={uploadActive} pick={() => fileRef.current?.click()} onPreview={setPreview} />}
         {section === 'settings' && <Settings ctx={ctx} />}
       </>}

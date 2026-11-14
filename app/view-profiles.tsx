@@ -43,7 +43,7 @@ export function ProfilesView({ ctx }: { ctx: Ctx }) {
         const open = (tab = '') => ctx.go(`profile/${profile.id}${tab}`);
         return <tr key={profile.id} className="clickable" onClick={() => open()}>
           <td><span className="who"><Avatar profile={profile} /><strong>{profile.name}</strong></span></td>
-          <td><span className="networks">{channels.map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
+          <td><span className="networks">{channels.filter(channel => channel.state === 'connected').map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
             {missingNetworks(connectedNetworks(profile.id, state)).map(network => <button key={network} className="link" onClick={event => { event.stopPropagation(); open('/settings'); }}>Подключить {networkName(network)}</button>)}</span></td>
           <td>{profile.configured ? <span className="yes"><Check size={14} />Добавлен</span> : <button className="link" onClick={event => { event.stopPropagation(); open('/settings'); }}>Добавить ключ</button>}</td>
           <td><span className="contact-cell">{address ? <span className="address-cell"><span>{address}</span><CopyButton value={address} /></span>
@@ -105,8 +105,8 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
       <div className="profile-title">
         <h1>{profile.name}</h1>
         <div className="profile-meta">
-          {channels.map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
-          {!channels.length && <span className="muted">Соцсети не подключены</span>}
+          {channels.filter(channel => channel.state === 'connected').map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
+          {!connected.length && <span className="muted">Соцсети не подключены</span>}
         </div>
       </div>
       <button className="ghost" onClick={() => ctx.bulk(id)}><Upload size={16} />Пачку в очередь</button>
@@ -125,14 +125,17 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
     {current === 'queue' && (profile.configured ? <QueueEditor profile={profile} ctx={ctx} /> : needsKey())}
     {current === 'stats' && (profile.configured ? <StatsPanel ctx={ctx} profiles={[profile]} /> : needsKey())}
     {current === 'settings' && <div className="columns">
-      <div className="stack"><AvatarPanel profile={profile} ctx={ctx} /><section className="panel"><header className="panel-head"><h2>Ключ Zernio</h2></header><div className="panel-body">
-        <ProfileKeyForm key={profile.id} profileId={id} name={profile.name} configured={profile.configured} canSave={state.canSaveKey} onSaved={async () => { await ctx.reload(); setRevision(value => value + 1); }} />
-      </div></section></div>
+      <div className="stack">
+        <section className="panel"><header className="panel-head"><h2>Название</h2></header><div className="panel-body"><ProfileNameForm key={`name-${id}`} profileId={id} name={profile.name} onSaved={ctx.reload} /></div></section>
+        <AvatarPanel profile={profile} ctx={ctx} />
+        <section className="panel"><div className="panel-body">
+          <ProfileKeyForm key={profile.id} profileId={id} name={profile.name} configured={profile.configured} canSave={state.canSaveKey} onSaved={async () => { await ctx.reload(); setRevision(value => value + 1); }} />
+        </div></section>
+      </div>
       <div className="stack">
         <section className="panel"><div className="panel-body"><ProfileSocialAccounts key={profile.id} profileId={id} configured={profile.configured} revision={revision} channels={channels} onUpdated={ctx.reload} /></div></section>
         <SocialPanel key={`social-${profile.id}`} profile={profile} />
         <DeleteProfile profile={profile} ctx={ctx} />
-        <section className="panel"><header className="panel-head"><h2>Название</h2></header><div className="panel-body"><ProfileNameForm key={`name-${id}`} profileId={id} name={profile.name} onSaved={ctx.reload} /></div></section>
       </div>
     </div>}
   </div>;

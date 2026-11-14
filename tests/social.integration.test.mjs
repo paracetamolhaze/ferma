@@ -127,16 +127,17 @@ test('mirrored posts are never duplicated and replies keep a human pace', { time
   await call({ action: 'seen', profileId: P, tgLastId: 40 });
   assert.equal((await call({ action: 'save', profileId: P, tgChannel: '@My_Channel', replies: true })).tgLastId, 40, 'same channel keeps its place');
 
-  // A post with two photos and no text goes to Threads at once, exactly once.
-  const begun = await call({ action: 'mirror', profileId: P, tgId: 41, text: '' });
-  assert.equal((await call({ action: 'mirror', profileId: P, tgId: 41, text: '' })).skip, true, 'no second copy');
+  // A post with two photos and no text goes to Threads at once, exactly once. Every call here runs on the test's
+  // own clock: a copy begun on the real clock would be «in the future» for a publish on the fixed one.
+  const begun = await call({ action: 'mirror', profileId: P, tgId: 41, text: '', now });
+  assert.equal((await call({ action: 'mirror', profileId: P, tgId: 41, text: '', now })).skip, true, 'no second copy');
   await call({ action: 'image', id: begun.id, bytes: [1, 2] });
   await call({ action: 'image', id: begun.id, bytes: [3], n: 1 });
   assert.equal((await call({ action: 'complete', id: begun.id })).ok, true);
   assert.equal((await call({ action: 'publish', id: begun.id, now })).ok, true);
   assert.deepEqual([posts[0].publishNow, posts[0].mediaItems.length, posts[0].platforms[0].platform], [true, 2, 'threads']);
   // A long text becomes a chain, photos stay on the first part.
-  const long = await call({ action: 'mirror', profileId: P, tgId: 42, text: 'Первое предложение. '.repeat(60) });
+  const long = await call({ action: 'mirror', profileId: P, tgId: 42, text: 'Первое предложение. '.repeat(60), now });
   await call({ action: 'complete', id: long.id });
   await call({ action: 'publish', id: long.id, now });
   const chain = posts[1].platforms[0].platformSpecificData.threadItems;
@@ -144,7 +145,7 @@ test('mirrored posts are never duplicated and replies keep a human pace', { time
   assert.equal(chain.map(part => part.content).join(' ').replace(/\s+/g, ' ').trim(), 'Первое предложение. '.repeat(60).trim());
   assert.deepEqual((await call({ action: 'split', text: 'короткий' })).parts, ['короткий']);
   // An empty post without photos cannot be published.
-  const empty = await call({ action: 'mirror', profileId: P, tgId: 43, text: '' });
+  const empty = await call({ action: 'mirror', profileId: P, tgId: 43, text: '', now });
   assert.equal((await call({ action: 'complete', id: empty.id })).status, 400);
 
   // A post that piled up is scheduled for later, and the queue end is known so the next one goes after it.

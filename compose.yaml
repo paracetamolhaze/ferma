@@ -7,11 +7,15 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:3100:3100"
+      # Public media port: signed picture links and the OAuth return only. Caddy forwards HTTPS here.
+      - "127.0.0.1:3102:3102"
     env_file:
       - path: ./docker.env
         required: false
     volumes:
       - data:/data
+      # A shared token for ferma-media-worker, written once by the app.
+      - internal:/internal
       # Photo folders named like profiles; read-only.
       - type: bind
         source: ${FERMA_PHOTOS:-C:/Users/almaz/Desktop/FERMA PHOTO}
@@ -24,8 +28,27 @@ services:
       start_period: 60s
       retries: 3
     stop_grace_period: 30s
-    # Rendering trial reels is CPU work: the container never takes more than 4 of the 12 threads,
+    # Rendering trial reels is CPU work: the container never takes more than 3 of the 12 threads,
     # so OBS and games on this PC keep the rest.
-    cpus: 4
+    cpus: 3
+  # ferma-media-worker: checks finished pictures (sharp): format, size, hashes. Reachable only inside this project's network.
+  media:
+    build: ./media-worker
+    image: ferma-media:local
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    volumes:
+      - internal:/internal:ro
+    environment:
+      MEDIA_CONCURRENCY: "1"
+      MEDIA_QUEUE: "4"
+      SHARP_THREADS: "1"
+    # Checking a picture takes a fraction of a second: one job at a time on 1 CPU is plenty.
+    cpus: 1
+    mem_limit: 512m
 volumes:
   data:
+  internal:

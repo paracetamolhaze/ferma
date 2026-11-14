@@ -368,3 +368,34 @@ img.avatar { object-fit: cover; background: #e9ebe5; }
 .rhythm-row label { display: inline-flex; align-items: center; gap: 6px; font-weight: 400; }
 .rhythm-row input { width: 64px; margin: 0; }
 .rhythm-row select { width: auto; min-height: 34px; margin: 0; }
+
+/* FERMA 2.0 screens */
+.grow { flex: 1; min-width: 0; }
+.toolbar-title { margin-right: auto; font-size: 16px; }
+.section-heading { margin-top: 8px; font-size: 16px; }
+table.variants td { vertical-align: top; }
+table.variants .post-text small.wrap { max-width: 460px; }
+.variant-thumb { position: relative; display: grid; place-items: center; width: 56px; height: 70px; border-radius: 6px; overflow: hidden; background: #eef0ea; color: var(--muted); font-weight: 700; }
+.variant-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.variant-thumb span { position: absolute; right: 3px; bottom: 3px; padding: 0 5px; border-radius: 99px; background: rgb(0 0 0 / .65); color: #fff; font-size: 11px; font-weight: 600; }
+.variant-thumb.empty { cursor: default; }
+.media-card > img { display: block; width: 100%; aspect-ratio: 4 / 5; object-fit: cover; }
+.palette-choice { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.palette-choice label { display: flex; align-items: center; gap: 8px; font-weight: 500; }
+.swatch { display: inline-block; flex: none; width: 16px; height: 16px; border-radius: 4px; border: 1px solid rgb(0 0 0 / .15); }
+.swatch.auto { background: conic-gradient(#e94b3c, #f2b33d, #3fb27f, #3c7be9, #9b5de5, #e94b3c); }
+.activity-list li { display: grid; gap: 8px; align-items: start; justify-content: stretch; }
+.activity-item .post-text strong { white-space: normal; }
+.activity-item form { max-width: 720px; }
+.panel-note { padding: 10px 16px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+.panel-note .link { font-size: 13px; }
+input.number-input { width: 96px; flex: none; }
+table.variants .post-text strong, table.variants .post-text small { white-space: normal; }
+table.variants td:nth-child(2) { min-width: 150px; }
+table.variants td:nth-child(4) { min-width: 200px; max-width: 280px; }
+.post-text strong.wrap, .post-text small.wrap { white-space: normal; }
+.attention { display: flex; flex: 1; align-items: flex-start; gap: 8px; min-width: 0; }
+.attention svg { flex: none; margin-top: 2px; color: var(--bad); }
+.variant-state { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+table.variants td:nth-child(3) { max-width: 360px; }
+.panel-head > span.muted { flex: none; text-align: right; }
