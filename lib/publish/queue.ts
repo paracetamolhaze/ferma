@@ -10,7 +10,7 @@ import { getDb } from '@/db';
 import { autopilotItems, campaigns, contentVariants, personas, posts, profiles, publicationEvents, publications, socialAccounts, sourceItems } from '@/db/schema';
 import { cancel as cancelAutopilot } from '../autopilot';
 import { readSettings, saveSettings } from '../content/gudini-source';
-import { approveVariant, variantMedia } from '../content/variants';
+import { approveVariant, VariantError, variantMedia } from '../content/variants';
 import { AccountError, freshToken } from './accounts';
 import { signedMediaUrl } from './public-media';
 import { adapterFor } from './registry';
@@ -295,7 +295,10 @@ export async function approve(owner: string, id: string) {
   const [variant] = await getDb().select({ status: contentVariants.status }).from(contentVariants).where(eq(contentVariants.id, row.variantId));
   if (!variant || variant.status === 'outdated') throw new QueueError('Материал изменился в Gudini: эта версия устарела.', 409);
   if (['rejected', 'failed', 'archived'].includes(variant.status)) throw new QueueError('Версия этой публикации отклонена или не получилась: исправьте её в «Вариантах».', 409);
-  if (variant.status === 'review') await approveVariant(owner, row.variantId);
+  if (variant.status === 'review') {
+    try { await approveVariant(owner, row.variantId); }
+    catch (error) { if (error instanceof VariantError) throw new QueueError('Версия изменилась, обновите страницу.', 409); throw error; }
+  }
   const next = await move(row, { status: 'scheduled', approvedAt: now(), error: null });
   if (!next) throw new QueueError('Публикация изменилась, обновите страницу.', 409);
   await log(owner, id, 'info', variant.status === 'review' ? 'Одобрено владельцем вместе с версией.' : 'Одобрено владельцем.');

@@ -110,6 +110,12 @@ async function threadsReplyState(graph: GraphCall, token: Token, containerId: st
   const body = await graph('GET', `${THREADS_GRAPH}/v1.0/${containerId}`, { fields: 'status,error_message' }, token.accessToken);
   return { status: str(body.status), error: str(body.error_message) };
 }
+/** The account's own reply under a Threads reply with one of these texts, if it is there already. */
+async function threadsReplyOf(graph: GraphCall, token: Token, replyId: string, texts: string[]) {
+  const body = await graph('GET', `${THREADS_GRAPH}/v1.0/${replyId}/replies`, { fields: 'id,text,is_reply_owned_by_me' }, token.accessToken);
+  const replies = Array.isArray(body.data) ? body.data as Record<string, unknown>[] : [];
+  return replies.find(reply => reply.is_reply_owned_by_me === true && texts.some(text => text && sameText(str(reply.text), text))) || null;
+}
 /** The account's own reply under an Instagram comment with one of these texts, if it is there already. */
 async function instagramReplyOf(graph: GraphCall, token: Token, commentId: string, username: string | null, texts: string[]) {
   const body = await graph('GET', `${INSTAGRAM_GRAPH}/v27.0/${commentId}/replies`, { fields: 'id,text,username,timestamp' }, token.accessToken);
@@ -144,10 +150,17 @@ export async function sendReply(owner: string, id: string, text: string, { reque
     const graph = graphClient(request, 20_000);
     if (account.provider === 'meta_threads') {
       if (task.replyContainerId) {
-        const container = await threadsReplyState(graph, token, task.replyContainerId);
-        if (container.status === 'PUBLISHED') return await sentEarlier(task.reply, null);
+        // The container of an earlier press is asked first. One that can no longer be read is checked by the
+        // account's own replies under the comment instead.
+        const container = await threadsReplyState(graph, token, task.replyContainerId).catch(error => {
+          if (error instanceof PublishError && !error.retryable && error.kind !== 'auth') return null;
+          throw error;
+        });
+        const earlier = container ? null : await threadsReplyOf(graph, token, task.remoteId, [task.reply || '', answer]);
+        if (earlier) return await sentEarlier(str(earlier.text) || task.reply, str(earlier.id) || null);
+        if (container?.status === 'PUBLISHED') return await sentEarlier(task.reply, null);
         // The earlier container with the same words is not out yet: the engine publishes it, no second one is made.
-        if (['FINISHED', 'IN_PROGRESS'].includes(container.status) && task.reply === answer) {
+        if (container && ['FINISHED', 'IN_PROGRESS'].includes(container.status) && task.reply === answer) {
           await db.update(engagementTasks).set({ updatedAt: new Date(nowMs - THREADS_WAIT_MS).toISOString() }).where(eq(engagementTasks.id, id));
           return { status: 'sending' };
         }

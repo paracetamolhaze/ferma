@@ -55,7 +55,7 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
         mediaTest: i => dg.startMediaTest(i.owner, i.accountId, fetch, i.now), mediaTestStatus: i => dg.readMediaTest(i.owner, i.accountId),
         reschedule: i => q.reschedule(i.owner, i.id, i.at, i.now), stopAll: i => q.stopAll(i.owner, { zernio: Boolean(i.zernio) }), hash: i => pic.storeAssetHash(i.owner, i.assetId, i.dhash),
         saveSource: i => src.saveGudiniSource(i.owner, i), sync: i => src.syncSource(i.owner, { force: i.force ?? true, nowMs: i.now }), assets: i => src.fetchAssets(i.owner, { limit: 30, nowMs: i.now }),
-        sourceView: i => src.sourceOverview(i.owner), settings: i => src.saveSettings(i.owner, i), retry: i => src.retryItem(i.owner, i.itemId), watch: i => src.watchSource(i.owner, 0, undefined, i.now),
+        sourceView: i => src.sourceOverview(i.owner), settings: i => src.saveSettings(i.owner, i), retry: i => src.retryItem(i.owner, i.itemId), ignoreItem: i => src.setItemIgnored(i.owner, i.itemId, i.ignored), watch: i => src.watchSource(i.owner, 0, undefined, i.now),
         ensure: i => v.ensureVariants(i.owner, i.itemId), writer: i => v.writerQueue(i.owner, 5), claimWriting: i => v.claimWriting(i.owner, i.itemId, i.revision),
         accept: i => v.acceptTexts(i.owner, i.itemId, i.revision, i.variants), edit: i => v.editVariant(i.owner, i.variantId, i), variants: i => v.variantsOverview(i.owner, { itemId: i.itemId }),
         claimRender: i => v.claimRender(i.owner, i.now), renderGudini: i => v.renderWithGudini(i.owner, i.jobId), fixedContent: i => v.fixedContent(i.owner, i.jobId, i), completeRender: i => v.completeRender(i.owner, i.jobId, i.files, {}),
@@ -606,4 +606,13 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   assert.ok(await bucket.get(coverRow.storageKey), 'Gudini\'s original stays');
   assert.equal((await rows(`SELECT status, assetsCount FROM content_variants WHERE id = '${igPub.variantId}'`))[0].status, 'archived');
   assert.equal((await rows(`SELECT status FROM publications WHERE id = '${igPub.id}'`))[0].status, 'published', 'the history stays');
+
+  // ---- 17. «Скрыть», then «Вернуть»: a material comes back as it was (missing files stay a failure, a repeat a repeat)
+  const sourceId = (await rows('SELECT id FROM content_sources LIMIT 1'))[0].id;
+  for (const [id, status, twin, stored] of [['hidden-failed', 'failed', null, 1], ['hidden-repeat', 'duplicate', newsId.id, 0]]) {
+    await db.prepare(`INSERT INTO source_items (id, owner, sourceId, externalId, kind, revision, title, payload, simhash, duplicateOf, status, assetsTotal, assetsStored, importedAt, updatedAt) VALUES ('${id}', '${OWNER}', '${sourceId}', '${id}', 'news', 'rev-1', '${id}', '{}', '0', ${twin ? `'${twin}'` : 'NULL'}, '${status}', 2, ${stored}, '2026-11-14', '2026-11-14')`).run();
+    await ok({ action: 'ignoreItem', itemId: id, ignored: true });
+    await ok({ action: 'ignoreItem', itemId: id, ignored: false });
+  }
+  assert.deepEqual((await rows(`SELECT status FROM source_items WHERE id IN ('hidden-failed', 'hidden-repeat') ORDER BY id`)).map(row => row.status), ['failed', 'duplicate']);
 });
