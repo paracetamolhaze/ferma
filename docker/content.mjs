@@ -65,7 +65,11 @@ export function parseJson(text) {
 export function parseVariants(text) {
   const parsed = parseJson(text);
   if (!Array.isArray(parsed.variants)) throw new Error('в ответе моста нет списка variants');
-  return parsed.variants.filter(entry => entry && Number.isInteger(entry.slot)).map(entry => ({ slot: entry.slot, headline: typeof entry.headline === 'string' ? entry.headline : null, text: typeof entry.text === 'string' ? entry.text : null, caption: typeof entry.caption === 'string' ? entry.caption : null }));
+  // content: the card texts of a Gudini redraw; the app checks them against Gudini's limits and the sources.
+  return parsed.variants.filter(entry => entry && Number.isInteger(entry.slot)).map(entry => ({
+    slot: entry.slot, headline: typeof entry.headline === 'string' ? entry.headline : null, text: typeof entry.text === 'string' ? entry.text : null, caption: typeof entry.caption === 'string' ? entry.caption : null,
+    ...(entry.content && typeof entry.content === 'object' && !Array.isArray(entry.content) ? { content: entry.content } : {}),
+  }));
 }
 
 let mediaToken = '';
@@ -256,10 +260,16 @@ async function suggestReplies() {
 async function hashPictures() {
   const { assets } = await app('/api/content?view=unhashed');
   for (const asset of assets || []) {
-    const response = await app(`/api/content?file=${encodeURIComponent(asset.key)}`, undefined, { raw: true });
-    const probe = await media('/probe', { data: Buffer.from(await response.arrayBuffer()).toString('base64') }, 60_000);
-    const stored = await content({ action: 'assetHash', assetId: asset.id, dhash: probe.dhash });
-    if (stored.related) log(`картинка ${asset.id.slice(0, 8)}: та же история, что и в материале ${stored.related.slice(0, 8)}`);
+    try {
+      const response = await app(`/api/content?file=${encodeURIComponent(asset.key)}`, undefined, { raw: true });
+      const probe = await media('/probe', { data: Buffer.from(await response.arrayBuffer()).toString('base64') }, 60_000);
+      const stored = await content({ action: 'assetHash', assetId: asset.id, dhash: probe.dhash });
+      if (stored.related) log(`картинка ${asset.id.slice(0, 8)}: та же история, что и в материале ${stored.related.slice(0, 8)}`);
+    } catch (error) {
+      // A file the worker refuses (not a picture, too large) gets no hash, once; the next pictures still get theirs.
+      if (error.status >= 400 && error.status < 500 && ![401, 408, 429].includes(error.status)) { await content({ action: 'assetHash', assetId: asset.id, dhash: null }); log(`картинка ${asset.id.slice(0, 8)}: без хеша (${error.message})`); }
+      else throw error;
+    }
   }
   return (assets || []).length;
 }
@@ -275,6 +285,7 @@ async function renderOne() {
   const began = Date.now();
   try {
     const drawn = await content({ action: 'renderGudini', jobId: job.jobId }, { timeoutMs: 330_000 });
+    if (drawn.skipped) return true;
     if (!drawn.ok) {
       if (drawn.fix && BRIDGE_TOKEN && Date.now() >= writerPausedUntil) {
         const answer = await bridge({ stage: 'Creative Director', model: MODEL, effort: EFFORT, system: drawn.fix.system, user: drawn.fix.user }, 10 * 60_000);
@@ -319,10 +330,6 @@ async function pass() {
   try { for (let index = 0; index < 2 && await writeOne(); index++); } catch (error) { remember('write', error); }
   try { for (let index = 0; index < 2 && await reviewOne(); index++); } catch (error) { remember('review', error); }
   if (light) { try { for (let index = 0; index < 3 && await renderOne(); index++); } catch (error) { remember('render', error); } }
-  if (now - lastPublish > 20_000) {
-    lastPublish = now;
-    try { const result = await app('/api/publications', { action: 'tick' }, { timeoutMs: 300_000 }); if (Object.keys(result.results || {}).length) { state.lastPublish = { at: new Date().toISOString(), ...result }; log('очередь:', JSON.stringify(result.results)); } } catch (error) { remember('publish', error); }
-  }
   if (light && now - lastStats > 30 * 60_000) { lastStats = now; app('/api/publications', { action: 'stats' }).catch(error => remember('stats', error)); }
   // Media retention: FERMA's own drawn cards that nobody can use any more (Gudini's originals are never removed).
   if (now - lastCleanup > 6 * 3600_000) {
@@ -336,8 +343,6 @@ async function pass() {
     try { const result = await app('/api/activity', { action: 'fetch' }, { timeoutMs: 300_000 }); if (result.added) log(`активность: новых комментариев ${result.added}`); } catch (error) { remember('activity', error); }
     try { await suggestReplies(); } catch (error) { remember('suggest', error); }
   }
-  // Threads answers wait half a minute anyway; once a minute is enough and spares the disk.
-  if (now - lastReplyTick > 60_000) { lastReplyTick = now; try { await app('/api/activity', { action: 'replyTick' }); } catch (error) { remember('reply', error); } }
   // Recommendations from the numbers, once a day; nothing is applied without the owner.
   if (now - lastRecommend > 24 * 3600_000) { lastRecommend = now; app('/api/analytics', { action: 'compute' }).catch(error => remember('analytics', error)); }
   // Starts of FERMA and the database copies, for «Состояние системы».
@@ -350,17 +355,37 @@ async function pass() {
   if (now - lastAccounts > 6 * 3600_000) { lastAccounts = now; app('/api/publications', { action: 'checkAccounts' }).catch(error => remember('accounts', error)); }
   // Full diagnostics of every account once a day (reads only: token, permissions, quota, insights).
   if (light && now - lastDiagnose > 3600_000) { lastDiagnose = now; app('/api/accounts', { action: 'diagnoseAll', staleHours: 24 }, { timeoutMs: 300_000 }).catch(error => remember('diagnostics', error)); }
-  if (now - lastMediaHealth > 60_000) {
-    lastMediaHealth = now;
-    try { const health = await media('/health', undefined, 5_000); await content({ action: 'heartbeat', name: 'media', ok: true, note: `занят: ${health.running}, ждут: ${health.waiting}, свободно памяти ${health.freeMemoryMb} МБ`, details: health }); }
-    catch (error) { await content({ action: 'heartbeat', name: 'media', ok: false, note: String(error.message).slice(0, 500), details: null }).catch(() => undefined); }
-  }
-  // Healthy = no error during the last five minutes; the latest error stays visible for a while either way.
-  // Every heartbeat is a database write: once a minute, or at once when health or the resource mode changes.
-  const healthy = Date.now() - lastErrorAt > 5 * 60_000;
-  if (now - lastBeat.at > 60_000 || healthy !== lastBeat.ok || state.resources.mode !== lastBeat.mode) {
-    lastBeat = { at: now, ok: healthy, mode: state.resources.mode };
-    await content({ action: 'heartbeat', name: 'engine', ok: healthy, note: healthy ? null : state.errors[0] ? `${state.errors[0].step}: ${state.errors[0].message}`.slice(0, 500) : null, details: state }).catch(() => undefined);
+}
+
+/**
+ * Publishing, Threads answers and the heartbeats keep their own clock: a long writer, editor or drawing call in
+ * the main pass never holds up a due post or makes a working engine look silent.
+ */
+async function timeLoop() {
+  for (;;) {
+    const now = Date.now();
+    try {
+      if (now - lastPublish > 20_000) {
+        lastPublish = now;
+        try { const result = await app('/api/publications', { action: 'tick' }, { timeoutMs: 300_000 }); if (Object.keys(result.results || {}).length) { state.lastPublish = { at: new Date().toISOString(), ...result }; log('очередь:', JSON.stringify(result.results)); } } catch (error) { remember('publish', error); }
+      }
+      // Threads answers wait half a minute anyway; once a minute is enough and spares the disk.
+      if (now - lastReplyTick > 60_000) { lastReplyTick = now; try { await app('/api/activity', { action: 'replyTick' }); } catch (error) { remember('reply', error); } }
+      if (now - lastMediaHealth > 60_000) {
+        lastMediaHealth = now;
+        try { const health = await media('/health', undefined, 5_000); await content({ action: 'heartbeat', name: 'media', ok: true, note: `занят: ${health.running}, ждут: ${health.waiting}, свободно памяти ${health.freeMemoryMb} МБ`, details: health }); }
+        catch (error) { await content({ action: 'heartbeat', name: 'media', ok: false, note: String(error.message).slice(0, 500), details: null }).catch(() => undefined); }
+      }
+      // Healthy = no error during the last five minutes; the latest error stays visible for a while either way.
+      // Every heartbeat is a database write: once a minute, or at once when health or the resource mode changes.
+      state.resources = resources();
+      const healthy = Date.now() - lastErrorAt > 5 * 60_000;
+      if (now - lastBeat.at > 60_000 || healthy !== lastBeat.ok || state.resources.mode !== lastBeat.mode) {
+        lastBeat = { at: now, ok: healthy, mode: state.resources.mode };
+        await content({ action: 'heartbeat', name: 'engine', ok: healthy, note: healthy ? null : state.errors[0] ? `${state.errors[0].step}: ${state.errors[0].message}`.slice(0, 500) : null, details: state }).catch(() => undefined);
+      }
+    } catch (error) { remember('pass', error); }
+    await sleep(5_000);
   }
 }
 
@@ -369,6 +394,7 @@ if (process.argv[1]?.endsWith('content.mjs') && ENABLED) {
   await sleep(8_000);
   readMediaToken();
   void watchLoop();
+  void timeLoop();
   for (;;) {
     try { await pass(); } catch (error) { remember('pass', error); }
     await sleep(10_000);

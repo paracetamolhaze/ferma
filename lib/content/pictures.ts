@@ -18,9 +18,19 @@ export async function unhashedAssets(owner: string, limit = 6) {
 
 const textOf = (payload: string) => { const item = JSON.parse(payload) as ExportItem; return { title: item.title, text: `${storyText(item)}\n${item.cards.map(card => `${card.title} ${card.body}`).join('\n')}` }; };
 
-/** Stores a picture's hash; a material without a relation yet is linked to a recent one with the same picture. */
-export async function storeAssetHash(owner: string, assetId: string, dhash: string) {
-  if (!/^[0-9a-f]{16}$/.test(dhash)) return { ok: false, related: null };
+/** Marks a file the media worker could not read (not a picture, too large): it gets no hash and is not sent again. */
+const NO_HASH = '-';
+const isHash = (value: string | null) => Boolean(value && /^[0-9a-f]{16}$/.test(value));
+/**
+ * Stores a picture's hash (null: the worker could not read the file); a material without a relation yet is linked
+ * to a recent one with the same picture.
+ */
+export async function storeAssetHash(owner: string, assetId: string, dhash: string | null) {
+  if (dhash === null) {
+    await getDb().update(sourceAssets).set({ dhash: NO_HASH }).where(and(eq(sourceAssets.id, assetId), eq(sourceAssets.owner, owner), isNull(sourceAssets.dhash)));
+    return { ok: true, related: null };
+  }
+  if (!isHash(dhash)) return { ok: false, related: null };
   const db = getDb();
   const [asset] = await db.update(sourceAssets).set({ dhash }).where(and(eq(sourceAssets.id, assetId), eq(sourceAssets.owner, owner))).returning({ itemId: sourceAssets.itemId });
   if (!asset) return { ok: false, related: null };
@@ -29,7 +39,7 @@ export async function storeAssetHash(owner: string, assetId: string, dhash: stri
   const since = new Date(Date.now() - 14 * 86_400_000).toISOString();
   const twins = (await db.select({ itemId: sourceAssets.itemId, dhash: sourceAssets.dhash }).from(sourceAssets)
     .where(and(eq(sourceAssets.owner, owner), isNotNull(sourceAssets.dhash), ne(sourceAssets.itemId, item.id), gte(sourceAssets.createdAt, since))).limit(2000))
-    .filter(row => hammingDistance(row.dhash!, dhash) <= 6);
+    .filter(row => isHash(row.dhash) && hammingDistance(row.dhash!, dhash) <= 6);
   if (!twins.length) return { ok: true, related: null };
   const mine = textOf(item.payload);
   for (const itemId of [...new Set(twins.map(row => row.itemId))].slice(0, 10)) {

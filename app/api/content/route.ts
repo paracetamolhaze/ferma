@@ -33,7 +33,7 @@ const inputSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('acceptClassification'), ids: z.array(id).min(1).max(40), items: z.array(z.object({ id: z.string().max(80), categories: z.unknown().optional(), urgent: z.unknown().optional() })).max(40).nullable() }),
   z.object({ action: z.literal('acceptReview'), itemId: id, revision: z.string().max(80), reviews: z.array(z.unknown()).max(20) }),
   z.object({ action: z.literal('reviewFailed'), itemId: id, revision: z.string().max(80) }),
-  z.object({ action: z.literal('assetHash'), assetId: id, dhash: z.string().max(32) }),
+  z.object({ action: z.literal('assetHash'), assetId: id, dhash: z.string().max(32).nullable() }),
   z.object({ action: z.literal('cleanup') }),
   z.object({ action: z.literal('ensureVariants'), itemId: id }),
   z.object({ action: z.literal('claimWriting'), itemId: id, revision: z.string().max(80) }),

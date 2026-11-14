@@ -11,7 +11,7 @@
  * rejected/failed = not used until edited or regenerated; outdated = the material changed in Gudini.
  */
 import { env } from 'cloudflare:workers';
-import { and, asc, desc, eq, inArray, lt, ne, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lt, ne, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { contentVariants, engineStatus, mediaJobs, profileEditorial, profiles, publications, socialAccounts, sourceAssets, sourceItems, variantAssets } from '@/db/schema';
 import { editableTexts, factBasis, storyText, type EditableContent, type ExportItem } from './contract';
@@ -55,8 +55,14 @@ export async function ensureVariants(owner: string, itemId: string) {
   const db = getDb();
   const item = await ownedItem(owner, itemId);
   if (item.status !== 'ready') throw new VariantError('Материал ещё не готов: файлы загружаются или есть ошибка.', 409);
-  const existing = await db.select({ id: contentVariants.id }).from(contentVariants).where(and(eq(contentVariants.itemId, itemId), eq(contentVariants.revision, item.revision)));
-  if (existing.length) return { created: 0 };
+  const existing = await db.select({ id: contentVariants.id, status: contentVariants.status }).from(contentVariants).where(and(eq(contentVariants.itemId, itemId), eq(contentVariants.revision, item.revision)));
+  if (existing.some(row => row.status !== 'outdated')) return { created: 0 };
+  if (existing.length) {
+    // The text came back to an earlier revision (an edit undone in Gudini): its versions no account took are written again.
+    const revived = await db.update(contentVariants).set({ status: 'planned', attempts: 0, error: null, quality: null, cards: null, assetsCount: 0, score: null, review: null, updatedAt: now() })
+      .where(and(eq(contentVariants.itemId, itemId), eq(contentVariants.revision, item.revision), eq(contentVariants.status, 'outdated'), isNull(contentVariants.profileId))).returning({ id: contentVariants.id });
+    return { created: 0, revived: revived.length };
+  }
   const settings = await readSettings(owner);
   const data = material(item);
   const planned = planVariants(data, settings.variantsPerItem);
@@ -75,8 +81,9 @@ async function writerCount(owner: string) {
   const details = parse<{ day?: string; calls?: number }>(row?.details, {});
   return details.day === DAY() ? details.calls || 0 : 0;
 }
-async function countWriterCall(owner: string) {
-  const calls = await writerCount(owner) + 1;
+/** delta −1: the call is given back (the bridge itself failed, nothing was written). */
+async function countWriterCall(owner: string, delta = 1) {
+  const calls = Math.max(0, await writerCount(owner) + delta);
   const values = { heartbeatAt: now(), ok: 1, note: `обращений к мосту сегодня: ${calls}`, details: JSON.stringify({ day: DAY(), calls }) };
   await getDb().insert(engineStatus).values({ id: crypto.randomUUID(), owner, name: 'writer', ...values }).onConflictDoUpdate({ target: [engineStatus.owner, engineStatus.name], set: values });
 }
@@ -143,7 +150,10 @@ export async function writerQueue(owner: string, limit = 1) {
   if (used >= settings.dailyWriterCalls) return { jobs: [], limitReached: true, used, limit: settings.dailyWriterCalls };
   // A version sent back by the checks waits two minutes before it is written again.
   const settled = new Date(Date.now() - 2 * 60_000).toISOString();
-  const rows = await db.select({ itemId: contentVariants.itemId }).from(contentVariants).where(and(eq(contentVariants.owner, owner), eq(contentVariants.status, 'planned'), sql`(${contentVariants.attempts} = 0 or ${contentVariants.updatedAt} < ${settled})`)).groupBy(contentVariants.itemId).orderBy(asc(sql`min(${contentVariants.createdAt})`)).limit(limit);
+  // Versions of the material's current text only, and not of a hidden material: nothing else may block the queue.
+  const rows = await db.select({ itemId: contentVariants.itemId }).from(contentVariants)
+    .innerJoin(sourceItems, and(eq(sourceItems.id, contentVariants.itemId), eq(sourceItems.revision, contentVariants.revision), ne(sourceItems.status, 'ignored')))
+    .where(and(eq(contentVariants.owner, owner), eq(contentVariants.status, 'planned'), sql`(${contentVariants.attempts} = 0 or ${contentVariants.updatedAt} < ${settled})`)).groupBy(contentVariants.itemId).orderBy(asc(sql`min(${contentVariants.createdAt})`)).limit(limit);
   const jobs = [];
   for (const { itemId } of rows) {
     const item = await ownedItem(owner, itemId);
@@ -275,6 +285,8 @@ export async function writingFailed(owner: string, itemId: string, revision: str
     const attempts = bridge ? Math.max(0, variant.attempts - 1) : variant.attempts;
     await db.update(contentVariants).set({ status: !bridge && attempts >= MAX_WRITES ? 'failed' : 'planned', attempts, error: `${bridge ? 'GPT-мост: ' : ''}${error}`.slice(0, 300), updatedAt: now() }).where(eq(contentVariants.id, variant.id));
   }
+  // The bridge never answered: the day's call is given back too, so an outage does not use up the daily number.
+  if (bridge && writing.length) await countWriterCall(owner, -1);
   return { returned: writing.length };
 }
 
@@ -329,7 +341,11 @@ export async function regenerateVariant(owner: string, variantId: string) {
 }
 export async function rejectVariant(owner: string, variantId: string) {
   await ownedVariant(owner, variantId);
-  await getDb().update(contentVariants).set({ status: 'rejected', updatedAt: now() }).where(eq(contentVariants.id, variantId));
+  // Its drawing goes too: a rejected version is never drawn, and a late drawing cannot make it ready again.
+  await getDb().batch([
+    getDb().update(contentVariants).set({ status: 'rejected', updatedAt: now() }).where(eq(contentVariants.id, variantId)),
+    getDb().delete(mediaJobs).where(and(eq(mediaJobs.kind, 'render'), eq(mediaJobs.subjectId, variantId))),
+  ]);
   return { ok: true };
 }
 
@@ -390,6 +406,8 @@ export async function renderWithGudini(owner: string, jobId: string, request?: t
   const [job] = await db.select().from(mediaJobs).where(and(eq(mediaJobs.id, jobId), eq(mediaJobs.owner, owner)));
   if (!job || job.status !== 'running') throw new VariantError('Задание не выполняется.', 409);
   const variant = await ownedVariant(owner, job.subjectId);
+  // A version rejected, written anew or out of date meanwhile is not drawn: its job is dropped.
+  if (variant.status !== 'rendering') { await db.delete(mediaJobs).where(eq(mediaJobs.id, jobId)); return { ok: false as const, skipped: true, problems: [] as string[] }; }
   const item = await ownedItem(owner, variant.itemId);
   const data = material(item);
   if (variant.layout !== 'gudini' || !data.editable || !variant.cards) throw new VariantError('Этот вариант не перерисовывается.', 409);
@@ -480,7 +498,7 @@ export async function completeRender(owner: string, jobId: string, files: Render
     db.update(contentVariants).set({
       status: close.length ? 'review' : 'ready', assetsCount: files.length, error: close.length ? 'Обложка почти такая же, как у другой перерисовки этого материала.' : null,
       quality: JSON.stringify({ ...quality, coverLikeOthers: close.length, renderedAt: now() }), updatedAt: now(),
-    }).where(and(eq(contentVariants.id, variant.id), ne(contentVariants.status, 'outdated'))),
+    }).where(and(eq(contentVariants.id, variant.id), eq(contentVariants.status, 'rendering'))),
     // A publication that was waiting for these cards may go at its time again, without the waiting pause.
     db.update(publications).set({ nextAttemptAt: null, error: null, updatedAt: now() }).where(and(eq(publications.variantId, variant.id), eq(publications.status, 'scheduled'))),
   ] as unknown as Parameters<typeof db.batch>[0]);
@@ -492,7 +510,7 @@ export async function failRender(owner: string, jobId: string, error: string, re
   if (!job) return { finished: true };
   const finished = !retryable || job.attempts >= MAX_RENDERS;
   await db.update(mediaJobs).set({ status: finished ? 'failed' : 'queued', error: error.slice(0, 500), leaseUntil: null, nextAttemptAt: finished ? null : new Date(nowMs + 60_000 * 2 ** job.attempts).toISOString(), updatedAt: now() }).where(eq(mediaJobs.id, jobId));
-  if (finished) await db.update(contentVariants).set({ status: 'review', error: `Карточки не нарисованы: ${error}`.slice(0, 500), updatedAt: now() }).where(and(eq(contentVariants.id, job.subjectId), ne(contentVariants.status, 'outdated')));
+  if (finished) await db.update(contentVariants).set({ status: 'review', error: `Карточки не нарисованы: ${error}`.slice(0, 500), updatedAt: now() }).where(and(eq(contentVariants.id, job.subjectId), eq(contentVariants.status, 'rendering')));
   return { finished };
 }
 
@@ -523,7 +541,8 @@ export async function variantsOverview(owner: string, filter: { itemId?: string 
     : await db.select().from(sourceItems).where(and(eq(sourceItems.owner, owner), eq(sourceItems.status, 'ready'), sql`exists (select 1 from content_variants v where v.itemId = ${sourceItems.id} and v.status != 'outdated')`)).orderBy(desc(sourceItems.sourceReadyAt)).limit(40);
   const ids = items.map(item => item.id);
   const variants = ids.length ? await db.select().from(contentVariants).where(and(inArray(contentVariants.itemId, ids), ne(contentVariants.status, 'outdated'))).orderBy(asc(contentVariants.slot)) : [];
-  const firsts = variants.length ? await db.select({ variantId: variantAssets.variantId, key: variantAssets.storageKey }).from(variantAssets).where(and(inArray(variantAssets.variantId, variants.map(variant => variant.id)), eq(variantAssets.index, 0))) : [];
+  // By material, not by version id: D1 takes at most 100 bound values per statement, 40 materials stay under it.
+  const firsts = variants.length ? await db.select({ variantId: variantAssets.variantId, key: variantAssets.storageKey }).from(variantAssets).innerJoin(contentVariants, eq(contentVariants.id, variantAssets.variantId)).where(and(inArray(contentVariants.itemId, ids), eq(variantAssets.index, 0))) : [];
   const settings = await readSettings(owner);
   // The stored files of every listed material in one read, not one read per material.
   const files = ids.length ? await db.select({ itemId: sourceAssets.itemId, revision: sourceAssets.revision, assetId: sourceAssets.assetId, storageKey: sourceAssets.storageKey }).from(sourceAssets).where(and(inArray(sourceAssets.itemId, ids), eq(sourceAssets.status, 'stored'))) : [];

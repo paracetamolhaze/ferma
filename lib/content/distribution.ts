@@ -7,7 +7,7 @@
  *   - accounts receiving the same material are spread in time, not posted at once;
  *   - the mode decides what happens next: draft, wait for approval, or publish after the quality check.
  */
-import { and, desc, eq, gte, inArray, ne, notInArray, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, notInArray, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { campaigns, contentVariants, profileEditorial, profiles, publications, socialAccounts, sourceItems } from '@/db/schema';
 import type { ExportItem } from './contract';
@@ -24,6 +24,8 @@ export { effectiveMode, nextSlot, pickVariant, topicScore, DEFAULT_EDITORIAL } f
 export type { Editorial, Mode } from './rules';
 
 const parse = <T>(value: string | null | undefined, fallback: T): T => { try { return value ? JSON.parse(value) as T : fallback; } catch { return fallback; } };
+/** Why FERMA itself withdrew a waiting publication: the material changed in Gudini, or the owner hid it. */
+const WITHDRAWN = ['revised', 'hidden'];
 export async function readEditorial(profileId: string): Promise<Editorial> {
   const [row] = await getDb().select().from(profileEditorial).where(eq(profileEditorial.profileId, profileId));
   if (!row) return DEFAULT_EDITORIAL;
@@ -54,12 +56,23 @@ async function itemsFor(owner: string, campaign: Campaign, limit: number, nowMs:
   return getDb().select().from(sourceItems).where(and(eq(sourceItems.owner, owner), eq(sourceItems.status, 'ready'), inArray(sourceItems.kind, expanded), gte(sourceItems.sourceReadyAt, since)))
     .orderBy(desc(sourceItems.urgent), desc(sourceItems.sourceReadyAt)).limit(limit);
 }
-/** Accounts that already got this story in another version (a related material) during the last week. */
+/**
+ * Accounts that already got this story in another version during the last week. The story is the whole chain of
+ * retellings (each links to the latest earlier one: C → B → A) and every material that links to one of them.
+ */
 async function storyTakenBy(item: Item, nowMs: number) {
   const db = getDb();
-  const related = await db.select({ id: sourceItems.id }).from(sourceItems).where(and(eq(sourceItems.owner, item.owner), sql`(${sourceItems.relatedTo} = ${item.id} or ${sourceItems.id} = ${item.relatedTo ?? ''})`));
-  if (!related.length) return new Set<string>();
-  const rows = await db.select({ accountId: publications.accountId }).from(publications).where(and(inArray(publications.itemId, related.map(row => row.id)), notInArray(publications.status, ['cancelled', 'failed']), gte(publications.scheduledFor, new Date(nowMs - 7 * 86_400_000).toISOString())));
+  const story = new Set<string>([item.id]);
+  for (let next = item.relatedTo, hop = 0; next && !story.has(next) && hop < 10; hop++) {
+    story.add(next);
+    const [earlier] = await db.select({ relatedTo: sourceItems.relatedTo }).from(sourceItems).where(and(eq(sourceItems.owner, item.owner), eq(sourceItems.id, next)));
+    next = earlier?.relatedTo ?? null;
+  }
+  for (const row of await db.select({ id: sourceItems.id }).from(sourceItems).where(and(eq(sourceItems.owner, item.owner), inArray(sourceItems.relatedTo, [...story])))) story.add(row.id);
+  story.delete(item.id);
+  if (!story.size) return new Set<string>();
+  // Bound values stay small: a story has a handful of materials; past 90 only the first are looked at.
+  const rows = await db.select({ accountId: publications.accountId }).from(publications).where(and(inArray(publications.itemId, [...story].slice(0, 90)), notInArray(publications.status, ['cancelled', 'failed']), gte(publications.scheduledFor, new Date(nowMs - 7 * 86_400_000).toISOString())));
   return new Set(rows.map(row => row.accountId));
 }
 
@@ -76,11 +89,15 @@ async function planItem(owner: string, campaign: Campaign, item: Item, accounts:
   if (wanted.length && !wanted.some(category => itemCategories.includes(category))) return [];
   const keywords = parse<string[]>(campaign.keywords, []);
   if (keywords.length && !topicScore(keywords, data)) return [];
-  const already = await db.select({ accountId: publications.accountId, scheduledFor: publications.scheduledFor }).from(publications).where(and(eq(publications.itemId, item.id), ne(publications.status, 'cancelled')));
+  // One publication per material and account, whatever its status: one the owner cancelled is not made again.
+  // One withdrawn because the material changed in Gudini (or was hidden and brought back) is planned again.
+  const existing = await db.select({ id: publications.id, accountId: publications.accountId, scheduledFor: publications.scheduledFor, status: publications.status, errorKind: publications.errorKind }).from(publications).where(eq(publications.itemId, item.id));
+  const revised = new Map(existing.filter(row => row.status === 'cancelled' && WITHDRAWN.includes(row.errorKind ?? '')).map(row => [row.accountId, row.id]));
+  const already = existing.filter(row => !revised.has(row.accountId) && row.status !== 'cancelled');
   const story = await storyTakenBy(item, nowMs);
   const editorials = new Map<string, Editorial>();
   for (const account of accounts) if (!editorials.has(account.profileId)) editorials.set(account.profileId, await readEditorial(account.profileId));
-  const scored = accounts.filter(account => !already.some(row => row.accountId === account.id) && !story.has(account.id))
+  const scored = accounts.filter(account => (revised.has(account.id) || !existing.some(row => row.accountId === account.id)) && !story.has(account.id))
     .map(account => ({ account, score: fitScore(editorials.get(account.profileId)!.topics, known, itemCategories, data) }))
     .filter(entry => entry.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -112,17 +129,23 @@ async function planItem(owner: string, campaign: Campaign, item: Item, accounts:
     if (!slot || slot > freshUntil) { result.push({ ...base, variantId: variant.id, style: variant.style, format: variant.format, at: null, status: 'skipped', reason: slot ? `материал станет старше ${maxAgeHours} ч раньше, чем у аккаунта найдётся свободное время` : 'нет свободного времени в ближайшие две недели' }); continue; }
     const mode = effectiveMode(campaign.mode as Mode, editorial.mode);
     const status = mode === 'draft' ? 'draft' : mode === 'manual' ? 'awaiting_approval' : 'scheduled';
+    const planned = { ...base, variantId: variant.id, style: variant.style, format: variant.format, at: new Date(slot).toISOString(), status, reason: null };
+    if (!dry) {
+      // The publication first: the version is bound and drawn only for a publication that was really written.
+      const fields = { campaignId: campaign.id, variantId: variant.id, format: variant.format, status, scheduledFor: new Date(slot).toISOString(), priority: urgent ? 1 : 0, updatedAt: now() };
+      const revisedId = revised.get(account.id);
+      const written = revisedId
+        ? await db.update(publications).set({ ...fields, attempts: 0, nextAttemptAt: null, lockedUntil: null, containerIds: null, parentContainerId: null, containerReadyAt: null, mediaKeys: null, mediaCount: 0, text: '', error: null, errorKind: null, approvedAt: null })
+          .where(and(eq(publications.id, revisedId), eq(publications.status, 'cancelled'), inArray(publications.errorKind, WITHDRAWN))).returning({ id: publications.id })
+        : await db.insert(publications).values({ id: crypto.randomUUID(), owner, profileId: account.profileId, accountId: account.id, provider: account.provider, platform: account.platform, itemId: item.id, idempotencyKey: `pub:${item.id}:${account.id}`, createdAt: now(), ...fields })
+          .onConflictDoNothing().returning({ id: publications.id });
+      if (!written.length) continue;
+      await db.update(contentVariants).set({ profileId: account.profileId, platform: account.platform, updatedAt: now() }).where(and(eq(contentVariants.id, variant.id), sql`${contentVariants.profileId} is null`));
+      if (variant.status === 'written') await queueRender(owner, variant.id);
+    }
     sameItem.push(slot);
     variant.profileId = account.profileId;
-    result.push({ ...base, variantId: variant.id, style: variant.style, format: variant.format, at: new Date(slot).toISOString(), status, reason: null });
-    if (dry) continue;
-    await db.update(contentVariants).set({ profileId: account.profileId, platform: account.platform, updatedAt: now() }).where(and(eq(contentVariants.id, variant.id), sql`${contentVariants.profileId} is null`));
-    if (variant.status === 'written') await queueRender(owner, variant.id);
-    await db.insert(publications).values({
-      id: crypto.randomUUID(), owner, profileId: account.profileId, accountId: account.id, provider: account.provider, platform: account.platform,
-      campaignId: campaign.id, itemId: item.id, variantId: variant.id, format: variant.format, status, scheduledFor: new Date(slot).toISOString(),
-      priority: urgent ? 1 : 0, idempotencyKey: `pub:${item.id}:${account.id}`, createdAt: now(), updatedAt: now(),
-    }).onConflictDoNothing();
+    result.push(planned);
   }
   return result;
 }

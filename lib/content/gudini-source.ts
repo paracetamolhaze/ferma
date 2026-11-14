@@ -165,7 +165,8 @@ export async function upsertItem(owner: string, source: Source, raw: unknown, fe
   const id = existing?.id || crypto.randomUUID();
   const fields = {
     kind: item.kind, revision: item.revision, title: item.title.slice(0, 500), category: item.category, topic: item.topic, language: item.language,
-    payload: JSON.stringify(item), simhash: hash, duplicateOf: twin?.id || null, relatedTo: sibling?.id || null, status: twin ? 'duplicate' : 'importing',
+    // A material the owner hid stays hidden when Gudini changes it.
+    payload: JSON.stringify(item), simhash: hash, duplicateOf: twin?.id || null, relatedTo: sibling?.id || null, status: existing?.status === 'ignored' ? 'ignored' : twin ? 'duplicate' : 'importing',
     assetsTotal: item.assets.filter(asset => wanted(asset.role, fetchVideo)).length, assetsStored: 0, attempts: 0, nextAttemptAt: null, error: null,
     sourceCreatedAt: item.createdAt, sourceReadyAt: item.readyAt, updatedAt: now(),
   };
@@ -178,14 +179,16 @@ export async function upsertItem(owner: string, source: Source, raw: unknown, fe
     writes.push(db.update(sourceItems).set(fields).where(eq(sourceItems.id, id)));
     // Versions made from the previous text are out of date; what is not published yet is withdrawn.
     writes.push(db.update(contentVariants).set({ status: 'outdated', updatedAt: now() }).where(and(eq(contentVariants.itemId, id), ne(contentVariants.revision, item.revision), inArray(contentVariants.status, ['planned', 'writing', 'reviewing', 'written', 'rendering', 'review', 'ready', 'rejected', 'failed']))));
-    writes.push(db.update(publications).set({ status: 'cancelled', error: 'Материал изменился в Gudini: будет новая версия.', updatedAt: now() }).where(and(eq(publications.itemId, id), inArray(publications.status, ['draft', 'awaiting_approval', 'scheduled']))));
+    // errorKind «revised»: distribution plans the same account again with a version of the new text.
+    writes.push(db.update(publications).set({ status: 'cancelled', error: 'Материал изменился в Gudini: будет новая версия.', errorKind: 'revised', updatedAt: now() }).where(and(eq(publications.itemId, id), inArray(publications.status, ['draft', 'awaiting_approval', 'scheduled']))));
   } else {
     writes.push(db.insert(sourceItems).values({ id, owner, sourceId: source.id, externalId: item.id, importedAt: now(), ...fields }).onConflictDoNothing());
   }
   // D1 takes at most 100 bound values per statement: 7 rows of 12 columns stay under it.
   for (let index = 0; index < assetRows.length; index += 7) writes.push(db.insert(sourceAssets).values(assetRows.slice(index, index + 7)).onConflictDoNothing());
   await db.batch(writes as unknown as Parameters<typeof db.batch>[0]);
-  if (!twin && !assetRows.some(row => row.status === 'pending')) await db.update(sourceItems).set({ status: 'ready' }).where(eq(sourceItems.id, id));
+  // Settled from the stored rows: a text that came back to an earlier revision (an edit undone) has its files already.
+  if (!twin) await settleItem(id);
   return { result: twin ? 'duplicate' as const : existing ? 'updated' as const : 'new' as const, id };
 }
 
@@ -304,13 +307,18 @@ export async function retryItem(owner: string, itemId: string) {
   ]);
   return { ok: true };
 }
-/** The owner can hide a material from distribution (or bring it back). */
+/**
+ * The owner can hide a material from distribution, or bring it back. Hidden, what was waiting to go out is
+ * withdrawn (and planned again once it is back). Brought back, it is settled again from its files: a repeat stays
+ * a repeat, missing files stay a failure, files of a newer Gudini text are fetched first.
+ */
 export async function setItemIgnored(owner: string, itemId: string, ignored: boolean) {
-  // Brought back, a material is what it was before: a repeat stays a repeat, one with missing files stays failed.
-  const restored = sql<string>`case when ${sourceItems.duplicateOf} is not null then 'duplicate' when ${sourceItems.assetsStored} < ${sourceItems.assetsTotal} then 'failed' else 'ready' end`;
-  const changed = await getDb().update(sourceItems).set({ status: ignored ? 'ignored' : restored, updatedAt: now() })
+  const db = getDb();
+  const changed = await db.update(sourceItems).set({ status: ignored ? 'ignored' : sql<string>`case when ${sourceItems.duplicateOf} is not null then 'duplicate' else 'importing' end`, updatedAt: now() })
     .where(and(eq(sourceItems.id, itemId), eq(sourceItems.owner, owner), inArray(sourceItems.status, ignored ? ['ready', 'failed', 'duplicate'] : ['ignored']))).returning({ id: sourceItems.id });
   if (!changed.length) throw new SourceError('Этот материал сейчас нельзя изменить.', 409);
+  if (ignored) await db.update(publications).set({ status: 'cancelled', error: 'Материал скрыт владельцем.', errorKind: 'hidden', updatedAt: now() }).where(and(eq(publications.itemId, itemId), inArray(publications.status, ['draft', 'awaiting_approval', 'scheduled'])));
+  else await settleItem(itemId);
   return { ok: true };
 }
 

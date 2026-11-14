@@ -5,7 +5,7 @@
  * headline quality and repetition are judged too. The rating 0-100 helps to choose the best versions; it is not a
  * proof of accuracy: any unsupported claim sends the version to the owner, a contradicted one back to the writer.
  */
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, ne, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { contentVariants, sourceItems } from '@/db/schema';
 import { editableTexts, storyText, type EditableContent, type ExportItem } from './contract';
@@ -54,9 +54,9 @@ function versionText(variant: typeof contentVariants.$inferSelect, item: ExportI
 /** The next material whose versions wait for the editor, as one task for the GPT bridge. */
 export async function reviewJob(owner: string) {
   const db = getDb();
-  // Only versions of the material's current text: older ones are out of date and must never block the queue.
+  // Only versions of the material's current text, and not of a hidden material: nothing else may block the queue.
   const [next] = await db.select({ itemId: contentVariants.itemId }).from(contentVariants)
-    .innerJoin(sourceItems, and(eq(sourceItems.id, contentVariants.itemId), eq(sourceItems.revision, contentVariants.revision)))
+    .innerJoin(sourceItems, and(eq(sourceItems.id, contentVariants.itemId), eq(sourceItems.revision, contentVariants.revision), ne(sourceItems.status, 'ignored')))
     .where(and(eq(contentVariants.owner, owner), eq(contentVariants.status, 'reviewing'))).groupBy(contentVariants.itemId).orderBy(asc(sql`min(${contentVariants.updatedAt})`)).limit(1);
   if (!next) return null;
   const [row] = await db.select().from(sourceItems).where(and(eq(sourceItems.id, next.itemId), eq(sourceItems.owner, owner)));

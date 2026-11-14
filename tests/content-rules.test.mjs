@@ -114,8 +114,12 @@ test('schedule: own hours and time zone, daily number, gap, and the same materia
 });
 
 test('writer answer: JSON is read from a fenced reply, junk entries dropped', () => {
-  const text = '```json\n{"variants":[{"slot":0,"text":"a"},{"slot":"x"},{"slot":2,"headline":"h","caption":"c"}]}\n```';
-  assert.deepEqual(parseVariants(text), [{ slot: 0, headline: null, text: 'a', caption: null }, { slot: 2, headline: 'h', text: null, caption: 'c' }]);
+  const text = '```json\n{"variants":[{"slot":0,"text":"a"},{"slot":"x"},{"slot":2,"headline":"h","caption":"c","content":{"cover":{"title":["T"]}}},{"slot":3,"content":"junk"}]}\n```';
+  assert.deepEqual(parseVariants(text), [
+    { slot: 0, headline: null, text: 'a', caption: null },
+    { slot: 2, headline: 'h', text: null, caption: 'c', content: { cover: { title: ['T'] } } },
+    { slot: 3, headline: null, text: null, caption: null },
+  ], 'the card texts of a Gudini redraw reach the app');
   assert.throws(() => parseVariants('{"nothing":1}'));
 });
 

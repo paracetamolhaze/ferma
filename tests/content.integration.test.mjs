@@ -607,12 +607,16 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   assert.equal((await rows(`SELECT status, assetsCount FROM content_variants WHERE id = '${igPub.variantId}'`))[0].status, 'archived');
   assert.equal((await rows(`SELECT status FROM publications WHERE id = '${igPub.id}'`))[0].status, 'published', 'the history stays');
 
-  // ---- 17. «Скрыть», then «Вернуть»: a material comes back as it was (missing files stay a failure, a repeat a repeat)
+  // ---- 17. «Скрыть», then «Вернуть»: what waited to go out is withdrawn; the material comes back as its files say
   const sourceId = (await rows('SELECT id FROM content_sources LIMIT 1'))[0].id;
-  for (const [id, status, twin, stored] of [['hidden-failed', 'failed', null, 1], ['hidden-repeat', 'duplicate', newsId.id, 0]]) {
-    await db.prepare(`INSERT INTO source_items (id, owner, sourceId, externalId, kind, revision, title, payload, simhash, duplicateOf, status, assetsTotal, assetsStored, importedAt, updatedAt) VALUES ('${id}', '${OWNER}', '${sourceId}', '${id}', 'news', 'rev-1', '${id}', '{}', '0', ${twin ? `'${twin}'` : 'NULL'}, '${status}', 2, ${stored}, '2026-11-14', '2026-11-14')`).run();
-    await ok({ action: 'ignoreItem', itemId: id, ignored: true });
-    await ok({ action: 'ignoreItem', itemId: id, ignored: false });
+  for (const [id, status, twin] of [['hidden-failed', 'failed', null], ['hidden-repeat', 'duplicate', newsId.id]]) {
+    await db.prepare(`INSERT INTO source_items (id, owner, sourceId, externalId, kind, revision, title, payload, simhash, duplicateOf, status, assetsTotal, assetsStored, importedAt, updatedAt) VALUES ('${id}', '${OWNER}', '${sourceId}', '${id}', 'news', 'rev-1', '${id}', '{}', '0', ${twin ? `'${twin}'` : 'NULL'}, '${status}', 2, 1, '2026-11-14', '2026-11-14')`).run();
   }
+  for (const [n, fileStatus] of [[1, 'stored'], [2, 'failed']]) await db.prepare(`INSERT INTO source_assets (id, owner, itemId, revision, assetId, role, contentType, size, status, error, createdAt, updatedAt) VALUES ('hidden-asset-${n}', '${OWNER}', 'hidden-failed', 'rev-1', 'file-${n}', 'card', 'image/jpeg', 10, '${fileStatus}', ${fileStatus === 'failed' ? "'HTTP 404'" : 'NULL'}, '2026-11-14', '2026-11-14')`).run();
+  await db.prepare(`INSERT INTO publications (id, owner, profileId, accountId, provider, platform, itemId, variantId, format, status, scheduledFor, idempotencyKey, createdAt, updatedAt) VALUES ('hidden-pub', '${OWNER}', '${P}', '${accountIds.threads}', 'meta_threads', 'threads', 'hidden-failed', 'none', 'text', 'scheduled', '${new Date(night + 7200_000).toISOString()}', 'test:hidden', '2026-11-14', '2026-11-14')`).run();
+  await ok({ action: 'ignoreItem', itemId: 'hidden-failed', ignored: true });
+  assert.deepEqual(Object.values((await rows(`SELECT status, errorKind FROM publications WHERE id = 'hidden-pub'`))[0]), ['cancelled', 'hidden'], 'hidden: its waiting publication is withdrawn');
+  await ok({ action: 'ignoreItem', itemId: 'hidden-repeat', ignored: true });
+  for (const id of ['hidden-failed', 'hidden-repeat']) await ok({ action: 'ignoreItem', itemId: id, ignored: false });
   assert.deepEqual((await rows(`SELECT status FROM source_items WHERE id IN ('hidden-failed', 'hidden-repeat') ORDER BY id`)).map(row => row.status), ['failed', 'duplicate']);
 });
