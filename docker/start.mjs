@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
-import { createGateway, createPublicGateway } from './gateway.mjs';
+import { createGateway, createPublicGateway, createRemoteGateway } from './gateway.mjs';
 import { randomBytes } from 'node:crypto';
 import { backupBeforeMigrations, rememberMigrations } from './backup.mjs';
 
@@ -70,12 +70,22 @@ setTimeout(startContent, 6000);
 const publicGateway = createPublicGateway();
 publicGateway.listen(3102, '0.0.0.0', () => console.log('FERMA public media: :3102'));
 gateway.listen(3100, '0.0.0.0', () => console.log('FERMA Docker: http://localhost:3100'));
+// The owner's own devices through the domain, like Gudini: only with a site password (FERMA_SITE_PASSWORD,
+// docker.env). Published on 127.0.0.1:3104 for Caddy; without a password this port is not opened at all.
+let remoteGateway = null;
+try {
+  if (process.env.FERMA_SITE_PASSWORD) {
+    remoteGateway = createRemoteGateway();
+    remoteGateway.listen(3104, '0.0.0.0', () => console.log('FERMA for own devices (password): :3104'));
+  } else console.log('FERMA for own devices: off (no FERMA_SITE_PASSWORD)');
+} catch (error) { console.error('FERMA for own devices: off,', error.message); }
 let stopping = false;
 function stop() {
   if (stopping) return;
   stopping = true;
   gateway.close();
   publicGateway.close();
+  remoteGateway?.close();
   autopilot?.kill('SIGTERM');
   content?.kill('SIGTERM');
   worker.kill('SIGTERM');

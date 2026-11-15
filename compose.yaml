@@ -9,6 +9,8 @@ services:
       - "127.0.0.1:3100:3100"
       # Public media port: signed picture links and the OAuth return only. Caddy forwards HTTPS here.
       - "127.0.0.1:3102:3102"
+      # The owner's own devices through the domain (password login, FERMA_SITE_PASSWORD). Caddy forwards HTTPS here.
+      - "127.0.0.1:3104:3104"
     env_file:
       - path: ./docker.env
         required: false
