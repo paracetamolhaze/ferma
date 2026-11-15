@@ -86,6 +86,7 @@ async function media(path, body, timeoutMs = 150_000) {
 
 const readText = file => { try { return readFileSync(file, 'utf8').trim(); } catch { return null; } };
 let lastCpu = null;
+let wasDiskBusy = false;
 /**
  * What is left: this container's CPU share (cgroup), and the Docker machine's load, free memory, disk space and
  * disk queue (the share of time tasks wait for the disk, /proc/pressure/io). The database writes to that disk: when
@@ -109,7 +110,9 @@ export function resources() {
   const machineLoad = Math.round(os.loadavg()[0] / cpus * 100) / 100;
   const memAvailableMb = megabytes('MemAvailable');
   const ioWaitPercent = Number(/some avg10=([\d.]+)/.exec(readText('/proc/pressure/io') || '')?.[1] ?? NaN);
-  const diskBusy = Number.isFinite(ioWaitPercent) && ioWaitPercent > 15;
+  // A gap between the thresholds: near one line the mode would flip back and forth, and every flip is a write.
+  const diskBusy = Number.isFinite(ioWaitPercent) && ioWaitPercent > (wasDiskBusy ? 10 : 20);
+  wasDiskBusy = diskBusy;
   const busy = (ownCpu !== null && ownCpu > 0.85) || machineLoad > 0.9 || (memAvailableMb > 0 && memAvailableMb < 400) || diskBusy;
   const mode = diskFreeGb !== null && diskFreeGb < 2 ? 'disk_low' : busy ? 'busy' : 'normal';
   return {
@@ -130,13 +133,25 @@ const remember = (where, error) => {
   state.errors.length = Math.min(state.errors.length, 8);
 };
 
+/**
+ * The main pass rests between rounds: 10 s while there is work, a minute when there is none. Every database query
+ * of the local D1 is a write to the disk (even a read), so an idle engine must not ask every few seconds.
+ * News from Gudini wakes it at once.
+ */
+let wake = null;
+const nap = ms => new Promise(resolve => {
+  const done = () => { clearTimeout(timer); wake = null; resolve(); };
+  const timer = setTimeout(done, ms);
+  wake = done;
+});
+
 /** Long poll: Gudini answers as soon as something new is ready, otherwise after 25 s. */
 async function watchLoop() {
   for (;;) {
     const began = Date.now();
     try {
       const result = await content({ action: 'watch', wait: 25 }, { timeoutMs: 60_000 });
-      if (result.changed) { log('Gudini: есть новые материалы'); if (!(await importNow())) await sleep(30_000); }
+      if (result.changed) { log('Gudini: есть новые материалы'); if (!(await importNow())) await sleep(30_000); else wake?.(); }
       if (result.off || result.error || result.waiting) await sleep(30_000);
     } catch (error) { remember('watch', error); await sleep(30_000); }
     // Never a tight loop, whatever the answers are.
@@ -316,20 +331,24 @@ async function renderOne() {
 
 let lastDistribute = 0, lastStats = 0, lastAccounts = 0, lastMediaHealth = 0, lastPublish = 0, lastDiagnose = 0, lastCleanup = 0, lastHousekeeping = 0, lastEngagement = 0, lastRecommend = 0, lastReplyTick = 0;
 let lastBeat = { at: 0, ok: null, mode: null };
+// The queue is looked at every 20 s while publishing is on (or something waits to be settled), every 2 min when off.
+let publishEvery = 20_000;
+/** One round of the content work. True when it found something to do, so the next round comes soon. */
 async function pass() {
   const now = Date.now();
+  let worked = false;
   state.resources = resources();
   const light = state.resources.mode === 'normal';
   const paused = PAUSED_WHEN[state.resources.mode] || [];
   if (paused.join() !== state.paused.join()) log(paused.length ? `мало ресурсов (${state.resources.mode}): ждут ${paused.join(', ')}` : 'ресурсов снова хватает');
   state.paused = paused;
   await importNow();
-  try { await classifyOne(); } catch (error) { remember('classify', error); }
-  if (light) { try { await hashPictures(); } catch (error) { remember('hash', error); } }
-  if (now - lastDistribute > 60_000) { lastDistribute = now; try { const result = await content({ action: 'distribute' }); if (result.planned) log(`распределено публикаций: ${result.planned}`); } catch (error) { remember('distribute', error); } }
-  try { for (let index = 0; index < 2 && await writeOne(); index++); } catch (error) { remember('write', error); }
-  try { for (let index = 0; index < 2 && await reviewOne(); index++); } catch (error) { remember('review', error); }
-  if (light) { try { for (let index = 0; index < 3 && await renderOne(); index++); } catch (error) { remember('render', error); } }
+  try { if (await classifyOne()) worked = true; } catch (error) { remember('classify', error); }
+  if (light) { try { if (await hashPictures()) worked = true; } catch (error) { remember('hash', error); } }
+  if (now - lastDistribute > 60_000) { lastDistribute = now; try { const result = await content({ action: 'distribute' }); if (result.planned) { worked = true; log(`распределено публикаций: ${result.planned}`); } } catch (error) { remember('distribute', error); } }
+  try { for (let index = 0; index < 2 && await writeOne(); index++) worked = true; } catch (error) { remember('write', error); }
+  try { for (let index = 0; index < 2 && await reviewOne(); index++) worked = true; } catch (error) { remember('review', error); }
+  if (light) { try { for (let index = 0; index < 3 && await renderOne(); index++) worked = true; } catch (error) { remember('render', error); } }
   if (light && now - lastStats > 30 * 60_000) { lastStats = now; app('/api/publications', { action: 'stats' }).catch(error => remember('stats', error)); }
   // Media retention: FERMA's own drawn cards that nobody can use any more (Gudini's originals are never removed).
   if (now - lastCleanup > 6 * 3600_000) {
@@ -355,6 +374,7 @@ async function pass() {
   if (now - lastAccounts > 6 * 3600_000) { lastAccounts = now; app('/api/publications', { action: 'checkAccounts' }).catch(error => remember('accounts', error)); }
   // Full diagnostics of every account once a day (reads only: token, permissions, quota, insights).
   if (light && now - lastDiagnose > 3600_000) { lastDiagnose = now; app('/api/accounts', { action: 'diagnoseAll', staleHours: 24 }, { timeoutMs: 300_000 }).catch(error => remember('diagnostics', error)); }
+  return worked;
 }
 
 /**
@@ -365,9 +385,14 @@ async function timeLoop() {
   for (;;) {
     const now = Date.now();
     try {
-      if (now - lastPublish > 20_000) {
+      if (now - lastPublish > publishEvery) {
         lastPublish = now;
-        try { const result = await app('/api/publications', { action: 'tick' }, { timeoutMs: 300_000 }); if (Object.keys(result.results || {}).length) { state.lastPublish = { at: new Date().toISOString(), ...result }; log('очередь:', JSON.stringify(result.results)); } } catch (error) { remember('publish', error); }
+        try {
+          const result = await app('/api/publications', { action: 'tick' }, { timeoutMs: 300_000 });
+          const moved = Object.keys(result.results || {}).length > 0;
+          publishEvery = result.off && !moved ? 120_000 : 20_000;
+          if (moved) { state.lastPublish = { at: new Date().toISOString(), ...result }; log('очередь:', JSON.stringify(result.results)); }
+        } catch (error) { remember('publish', error); }
       }
       // Threads answers wait half a minute anyway; once a minute is enough and spares the disk.
       if (now - lastReplyTick > 60_000) { lastReplyTick = now; try { await app('/api/activity', { action: 'replyTick' }); } catch (error) { remember('reply', error); } }
@@ -396,7 +421,8 @@ if (process.argv[1]?.endsWith('content.mjs') && ENABLED) {
   void watchLoop();
   void timeLoop();
   for (;;) {
-    try { await pass(); } catch (error) { remember('pass', error); }
-    await sleep(10_000);
+    let worked = false;
+    try { worked = await pass(); } catch (error) { remember('pass', error); }
+    await nap(worked ? 10_000 : 60_000);
   }
 } else if (process.argv[1]?.endsWith('content.mjs')) log('выключен (CONTENT_ENGINE=off)');

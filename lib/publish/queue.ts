@@ -7,9 +7,9 @@
  */
 import { and, asc, desc, eq, gte, inArray, lt, lte, isNull, or, sql } from 'drizzle-orm';
 import { getDb } from '@/db';
-import { autopilotItems, campaigns, contentVariants, personas, posts, profiles, publicationEvents, publications, socialAccounts, sourceItems } from '@/db/schema';
+import { autopilotItems, campaigns, contentSettings, contentVariants, personas, posts, profiles, publicationEvents, publications, socialAccounts, sourceItems } from '@/db/schema';
 import { cancel as cancelAutopilot } from '../autopilot';
-import { readSettings, saveSettings } from '../content/gudini-source';
+import { readSettings, saveSettings, settingsOf } from '../content/gudini-source';
 import { approveVariant, VariantError, variantMedia } from '../content/variants';
 import { AccountError, freshToken } from './accounts';
 import { signedMediaUrl } from './public-media';
@@ -230,22 +230,26 @@ async function advance(owner: string, row: Publication, request: typeof fetch, n
 }
 
 /**
- * One pass of the queue, called by the engine every ~20 s. Does a few steps and returns; long waits (processing
- * of pictures by the network) happen between passes, not inside a request.
+ * One pass of the queue, called by the engine every ~20 s (every 2 min while publishing is off and nothing waits).
+ * Does a few steps and returns; long waits (processing of pictures by the network) happen between passes.
  */
 export async function publicationTick(owner: string, { nowMs = Date.now(), request = fetch }: { nowMs?: number; request?: typeof fetch } = {}) {
   const db = getDb();
   const at = new Date(nowMs).toISOString();
-  // Work a crashed pass left behind: an unfinished container step starts again, an unfinished publish is checked.
-  await db.update(publications).set({ status: 'scheduled', lockedUntil: null, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'preparing'), lt(publications.lockedUntil, at)));
-  await db.update(publications).set({ status: 'uncertain', lockedUntil: null, nextAttemptAt: at, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'publishing'), lt(publications.lockedUntil, at)));
-  const settings = await readSettings(owner);
+  // One database call to start (every local D1 call is a disk write, even a read): work a crashed pass left behind
+  // (an unfinished container step starts again, an unfinished publish is checked), the settings and the uncertain
+  // ones. An uncertain publication is settled even with publishing switched off; it is published only while it is on.
+  const [, , settingsRows, uncertain] = await db.batch([
+    db.update(publications).set({ status: 'scheduled', lockedUntil: null, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'preparing'), lt(publications.lockedUntil, at))),
+    db.update(publications).set({ status: 'uncertain', lockedUntil: null, nextAttemptAt: at, updatedAt: at }).where(and(eq(publications.owner, owner), eq(publications.status, 'publishing'), lt(publications.lockedUntil, at))),
+    db.select().from(contentSettings).where(eq(contentSettings.owner, owner)),
+    db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'uncertain'), or(isNull(publications.nextAttemptAt), lte(publications.nextAttemptAt, at)))).limit(PER_TICK),
+  ]);
+  const settings = settingsOf(owner, settingsRows[0]);
   // Read again right before anything is sent: «Остановить всё» may land while this pass is running.
   const mayPublish: Gate = async () => { const current = await readSettings(owner); return { publish: Boolean(current.autopublish), maxAgeHours: current.maxAgeHours }; };
   const results: Record<string, number> = {};
   const count = (key: string) => { results[key] = (results[key] || 0) + 1; };
-  // An uncertain publication is settled even with publishing switched off; it is published only while it is on.
-  const uncertain = await db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'uncertain'), or(isNull(publications.nextAttemptAt), lte(publications.nextAttemptAt, at)))).limit(PER_TICK);
   for (const row of uncertain) count(await advance(owner, row, request, nowMs, mayPublish));
   if (!settings.autopublish) return { off: true, results };
   const processing = await db.select().from(publications).where(and(eq(publications.owner, owner), eq(publications.status, 'processing'), lte(publications.containerReadyAt, at))).orderBy(asc(publications.containerReadyAt)).limit(PER_TICK);

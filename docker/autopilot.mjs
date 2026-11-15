@@ -11,7 +11,11 @@ const IMAGE_URL = process.env.BRIDGE_IMAGE_URL || 'http://host.docker.internal:4
 const TOKEN = process.env.CODEX_BRIDGE_TOKEN || '';
 const MODEL = process.env.CODEX_MODEL || 'gpt-6-astra';
 const EFFORT = process.env.CODEX_REASONING_EFFORT || 'high';
-const LOOP_MS = 30_000;
+// Once a minute is plenty: items are prepared hours ahead and Zernio publishes them at their time. Every local
+// database query is a disk write, so an idle loop must not ask every few seconds.
+const LOOP_MS = 60_000;
+// The extra heartbeat only shows that the engine is alive while a long generation holds a pass.
+const BEAT_MS = 120_000;
 // Items are prepared this long before their time, so Zernio publishes them even if this computer is off then.
 const LEAD_MS = 8 * 3600_000;
 // Reels are rendered closer to their time: videos are large and wait in storage until they are out.
@@ -572,4 +576,4 @@ async function pass() {
 if (!TOKEN && process.argv[1]?.endsWith('autopilot.mjs')) log('нет CODEX_BRIDGE_TOKEN: генерация недоступна, план и публикация готовых продолжают работать');
 if (process.argv[1]?.endsWith('autopilot.mjs')) setTimeout(async () => {
   try { const { recovered } = await worker('/api/autopilot', { action: 'recover' }); if (recovered) log(`после перезапуска возвращено в работу: ${recovered}`); } catch (error) { log('восстановление:', error.message); }
-  void pass(); setInterval(() => void pass(), LOOP_MS); void socialPass(); setInterval(() => void socialPass(), LOOP_MS); setInterval(() => void beat(), LOOP_MS); }, 20_000);
+  void pass(); setInterval(() => void pass(), LOOP_MS); void socialPass(); setInterval(() => void socialPass(), LOOP_MS); setInterval(() => void beat(), BEAT_MS); }, 20_000);

@@ -106,9 +106,12 @@ async function transportFor(owner: string, source: Source, request?: typeof fetc
   catch { throw new SourceError('Токен Gudini не читается. Сохраните его заново.', 409); }
   return gudiniTransport(source.baseUrl, token, request);
 }
+/** The owner's pipeline settings as stored, or the defaults while nothing was saved. */
+export const settingsOf = (owner: string, row: typeof contentSettings.$inferSelect | undefined) =>
+  row || { owner, variantsPerItem: 5, autopublish: 0, dailyWriterCalls: 60, fetchVideo: 0, publicBaseUrl: null as string | null, updatedAt: now(), qualityThreshold: 80, maxAgeHours: 48, retentionDays: 30, reviewEnabled: 1 };
 export async function readSettings(owner: string) {
   const [row] = await getDb().select().from(contentSettings).where(eq(contentSettings.owner, owner));
-  return row || { owner, variantsPerItem: 5, autopublish: 0, dailyWriterCalls: 60, fetchVideo: 0, publicBaseUrl: null as string | null, updatedAt: now(), qualityThreshold: 80, maxAgeHours: 48, retentionDays: 30, reviewEnabled: 1 };
+  return settingsOf(owner, row);
 }
 
 /** Connects Gudini: the address must answer as gudini.export/v1 and accept the token before anything is saved. */
