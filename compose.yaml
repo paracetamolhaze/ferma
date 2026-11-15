@@ -11,6 +11,10 @@ services:
       - "127.0.0.1:3102:3102"
       # The owner's own devices through the domain (password login, FERMA_SITE_PASSWORD). Caddy forwards HTTPS here.
       - "127.0.0.1:3104:3104"
+    # The home router does not loop requests back to its own public address: FERMA's domain (FERMA_DOMAIN in
+    # the local .env) is reached through this PC's shared entrance, so FERMA's own checks see what Meta sees.
+    extra_hosts:
+      - "${FERMA_DOMAIN:-ferma.invalid}:host-gateway"
     env_file:
       - path: ./docker.env
         required: false
