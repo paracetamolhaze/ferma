@@ -1,6 +1,7 @@
 /**
- * Social accounts connected through the owner's own Meta app: app settings, OAuth, encrypted tokens,
- * connection checks and token refresh. Every account keeps its own token; nothing is shared between accounts.
+ * Social accounts connected through the owner's own apps: Meta for Threads and Instagram, Google for YouTube.
+ * App settings, OAuth, encrypted tokens, connection checks and token renewal. Every account keeps its own token;
+ * nothing is shared between accounts.
  */
 import { and, asc, eq, inArray, lt, ne } from 'drizzle-orm';
 import { getDb } from '@/db';
@@ -9,26 +10,32 @@ import { openSecret, sealSecret } from '../content/secrets';
 import { adapterFor, PROVIDERS } from './registry';
 import { instagramAuthorizeUrl, instagramExchangeCode } from './instagram';
 import { threadsAuthorizeUrl, threadsExchangeCode } from './threads';
+import { GOOGLE_CLIENT_ID, youtubeAuthorizeUrl, youtubeExchangeCode, youtubeRefresh } from './youtube';
 import { PublishError, type MetaApp, type Provider, type Token } from './types';
 
 export class AccountError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
 const now = () => new Date().toISOString();
-type MetaProvider = 'meta_threads' | 'meta_instagram';
+/** Networks connected through the owner's own app (TikTok goes through Zernio). */
+export type AppProvider = 'meta_threads' | 'meta_instagram' | 'youtube';
+const NETWORK: Record<AppProvider, string> = { meta_threads: 'Threads', meta_instagram: 'Instagram', youtube: 'YouTube' };
+const appName = (provider: AppProvider) => provider === 'youtube' ? 'Приложение Google для YouTube' : `Приложение Meta для ${NETWORK[provider]}`;
 const STATE_TTL_MS = 15 * 60_000;
 
-export async function readApp(owner: string, provider: MetaProvider): Promise<MetaApp | null> {
+export async function readApp(owner: string, provider: AppProvider): Promise<MetaApp | null> {
   const [row] = await getDb().select().from(providerApps).where(and(eq(providerApps.owner, owner), eq(providerApps.provider, provider)));
   if (!row) return null;
   return { appId: row.appId, appSecret: await openSecret(owner, `app:${provider}`, row.encryptedSecret), redirectUri: row.redirectUri };
 }
-/** Saves the owner's Meta app for Threads or Instagram. The secret is stored encrypted and never sent to the browser. */
-export async function saveApp(owner: string, provider: MetaProvider, input: { appId: string; appSecret?: string | null; redirectUri: string }) {
-  if (!/^\d{5,25}$/.test(input.appId.trim())) throw new AccountError('ID приложения состоит из цифр (его видно в кабинете Meta for Developers).');
+/** Saves the owner's app for a network. The secret is stored encrypted and never sent to the browser. */
+export async function saveApp(owner: string, provider: AppProvider, input: { appId: string; appSecret?: string | null; redirectUri: string }) {
+  if (provider === 'youtube' ? !GOOGLE_CLIENT_ID.test(input.appId.trim()) : !/^\d{5,25}$/.test(input.appId.trim())) {
+    throw new AccountError(provider === 'youtube' ? 'ID клиента Google выглядит как 123456-abc….apps.googleusercontent.com (Google Cloud → Google Auth Platform → Клиенты).' : 'ID приложения состоит из цифр (его видно в кабинете Meta for Developers).');
+  }
   let redirect: URL;
-  try { redirect = new URL(input.redirectUri.trim()); } catch { throw new AccountError('Адрес возврата должен быть полным, например https://ваш-домен/ferma/oauth/threads.'); }
-  if (redirect.protocol !== 'https:') throw new AccountError('Meta принимает только адрес возврата на https://.');
+  try { redirect = new URL(input.redirectUri.trim()); } catch { throw new AccountError('Адрес возврата должен быть полным, например https://ваш-домен/oauth/threads.'); }
+  if (redirect.protocol !== 'https:') throw new AccountError('Адрес возврата должен начинаться с https://.');
   const existing = await readApp(owner, provider).catch(() => null);
   const secret = input.appSecret?.trim() || existing?.appSecret || '';
   if (secret.length < 16) throw new AccountError('Добавьте секрет приложения.');
@@ -39,16 +46,16 @@ export async function saveApp(owner: string, provider: MetaProvider, input: { ap
 }
 
 /** Step 1 of connecting: a one-time state bound to the profile, and the login page of the network. */
-export async function startConnect(owner: string, profileId: string, provider: MetaProvider) {
+export async function startConnect(owner: string, profileId: string, provider: AppProvider) {
   const db = getDb();
   const [profile] = await db.select({ id: profiles.id }).from(profiles).where(and(eq(profiles.id, profileId), eq(profiles.owner, owner)));
   if (!profile) throw new AccountError('Профиль не найден.', 404);
   const app = await readApp(owner, provider);
-  if (!app) throw new AccountError(`Сначала добавьте приложение Meta для ${provider === 'meta_threads' ? 'Threads' : 'Instagram'} в «Аккаунтах».`, 409);
+  if (!app) throw new AccountError(`Сначала добавьте ${appName(provider).toLowerCase()} в «Аккаунтах».`, 409);
   await db.delete(oauthStates).where(lt(oauthStates.expiresAt, now()));
-  const state = `${provider === 'meta_threads' ? 'th' : 'ig'}_${crypto.randomUUID().replace(/-/g, '')}`;
+  const state = `${{ meta_threads: 'th', meta_instagram: 'ig', youtube: 'yt' }[provider]}_${crypto.randomUUID().replace(/-/g, '')}`;
   await db.insert(oauthStates).values({ state, owner, profileId, provider, createdAt: now(), expiresAt: new Date(Date.now() + STATE_TTL_MS).toISOString() });
-  return { url: provider === 'meta_threads' ? threadsAuthorizeUrl(app, state) : instagramAuthorizeUrl(app, state) };
+  return { url: provider === 'meta_threads' ? threadsAuthorizeUrl(app, state) : provider === 'meta_instagram' ? instagramAuthorizeUrl(app, state) : youtubeAuthorizeUrl(app, state) };
 }
 
 /** Step 2: the network sent the owner back with a code. Exchanges it, checks the account and stores its token. */
@@ -57,14 +64,16 @@ export async function finishConnect(owner: string, state: string, code: string, 
   const [saved] = await db.select().from(oauthStates).where(and(eq(oauthStates.state, state), eq(oauthStates.owner, owner)));
   await db.delete(oauthStates).where(eq(oauthStates.state, state));
   if (!saved || Date.parse(saved.expiresAt) < Date.now()) throw new AccountError('Ссылка входа устарела. Нажмите «Подключить» ещё раз.', 410);
-  const provider = saved.provider as MetaProvider;
+  const provider = saved.provider as AppProvider;
   const app = await readApp(owner, provider);
-  if (!app) throw new AccountError('Приложение Meta не настроено.', 409);
+  if (!app) throw new AccountError(`${appName(provider)} не настроено.`, 409);
   let token: Token;
-  try { token = provider === 'meta_threads' ? await threadsExchangeCode(app, code, request) : await instagramExchangeCode(app, code, request); }
+  try { token = provider === 'meta_threads' ? await threadsExchangeCode(app, code, request) : provider === 'meta_instagram' ? await instagramExchangeCode(app, code, request) : await youtubeExchangeCode(app, code, request); }
   catch (error) { throw new AccountError(error instanceof PublishError ? `${error.message}${error.detail ? ` (${error.detail})` : ''}` : 'Соцсеть не выдала доступ.', 502); }
   const adapter = adapterFor(provider, request);
-  const account = await adapter.checkConnection(token);
+  let account;
+  try { account = await adapter.checkConnection(token); }
+  catch (error) { throw new AccountError(error instanceof PublishError ? `${error.message}${error.detail ? ` (${error.detail})` : ''}` : 'Аккаунт не прочитан.', 502); }
   if (provider === 'meta_instagram' && account.accountType && !['BUSINESS', 'MEDIA_CREATOR', 'CREATOR'].includes(account.accountType.toUpperCase())) {
     throw new AccountError('Instagram публикует через API только профессиональные аккаунты (бизнес или автор). Переключите тип аккаунта в Instagram и подключите снова.', 409);
   }
@@ -73,13 +82,18 @@ export async function finishConnect(owner: string, state: string, code: string, 
   const id = crypto.randomUUID();
   const encryptedToken = await sealSecret(owner, `account:${provider}:${account.id}`, JSON.stringify(token));
   const platform = PROVIDERS.find(entry => entry.provider === provider)!.platform;
-  const values = { remoteId: account.id, username: account.username, name: account.name || null, accountType: account.accountType || null, followers: account.followers ?? null, encryptedToken, tokenExpiresAt: token.expiresAt, tokenObtainedAt: token.obtainedAt, status: 'connected', error: null, lastCheckedAt: now(), updatedAt: now() };
+  const values = { remoteId: account.id, username: account.username, name: account.name || null, accountType: account.accountType || null, followers: account.followers ?? null, encryptedToken, tokenExpiresAt: accessUntil(provider, token), tokenObtainedAt: token.obtainedAt, status: 'connected', error: null, lastCheckedAt: now(), updatedAt: now() };
   await db.insert(socialAccounts).values({ id, owner, profileId: saved.profileId, platform, provider, createdAt: now(), ...values })
     .onConflictDoUpdate({ target: [socialAccounts.profileId, socialAccounts.provider], set: values });
   return { profileId: saved.profileId, provider, username: account.username };
 }
 
 type Account = typeof socialAccounts.$inferSelect;
+/**
+ * Until when the owner's access lasts, as the screens show it: Meta's token itself; for YouTube the refresh key
+ * (Google's access token lives only an hour and is renewed by itself), null when Google set it no end.
+ */
+const accessUntil = (provider: string, token: Token) => provider === 'youtube' ? token.refreshExpiresAt ?? null : token.expiresAt;
 export async function tokenOf(owner: string, account: Account): Promise<Token> {
   try { return JSON.parse(await openSecret(owner, `account:${account.provider}:${account.remoteId}`, account.encryptedToken)) as Token; }
   catch { throw new AccountError('Токен аккаунта не читается. Подключите аккаунт заново.', 409); }
@@ -87,17 +101,24 @@ export async function tokenOf(owner: string, account: Account): Promise<Token> {
 async function storeToken(owner: string, account: Account, token: Token) {
   const encryptedToken = await sealSecret(owner, `account:${account.provider}:${account.remoteId}`, JSON.stringify(token));
   // An account removed meanwhile keeps its empty token.
-  await getDb().update(socialAccounts).set({ encryptedToken, tokenExpiresAt: token.expiresAt, tokenObtainedAt: token.obtainedAt, updatedAt: now() }).where(and(eq(socialAccounts.id, account.id), ne(socialAccounts.status, 'disabled')));
+  await getDb().update(socialAccounts).set({ encryptedToken, tokenExpiresAt: accessUntil(account.provider, token), tokenObtainedAt: token.obtainedAt, updatedAt: now() }).where(and(eq(socialAccounts.id, account.id), ne(socialAccounts.status, 'disabled')));
 }
 /** A token that is about to run out is renewed; an account whose token was refused is marked for reconnection. */
 export async function freshToken(owner: string, account: Account, request: typeof fetch = fetch, nowMs = Date.now()) {
   const token = await tokenOf(owner, account);
-  if (token.expiresAt && Date.parse(token.expiresAt) < nowMs) {
+  const until = accessUntil(account.provider, token);
+  if (until && Date.parse(until) < nowMs) {
     await getDb().update(socialAccounts).set({ status: 'expired', error: 'Доступ истёк. Подключите аккаунт заново.', updatedAt: now() }).where(eq(socialAccounts.id, account.id));
     throw new AccountError('Доступ к аккаунту истёк. Подключите его заново.', 409);
   }
   try {
-    const fresh = await adapterFor(account.provider as Provider, request).refresh(token, nowMs);
+    let fresh: Token;
+    if (account.provider === 'youtube') {
+      // Google renews with the app's own keys.
+      const app = await readApp(owner, 'youtube');
+      if (!app) throw new AccountError('Приложение Google для YouTube не добавлено.', 409);
+      fresh = await youtubeRefresh(app, token, request, nowMs);
+    } else fresh = await adapterFor(account.provider as Provider, request).refresh(token, nowMs);
     // A renewal may keep the same token string with a new expiry: whatever was renewed is stored.
     if (fresh !== token) await storeToken(owner, account, fresh);
     return fresh;

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { getChatGPTUser } from '../../chatgpt-auth';
 import { ProviderError } from '@/lib/zernio';
-import { queueInput, readConnectUrl, readQueue, readRemotePosts, readStats, saveQueue } from '@/lib/zernio-insights';
+import { queueInput, readConnectUrl, readQueue, readRemotePosts, readStats, readZernioAccounts, saveQueue } from '@/lib/zernio-insights';
 
 export const dynamic = 'force-dynamic';
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { 'Cache-Control': 'no-store' } });
@@ -23,6 +23,7 @@ export async function GET(request: Request) {
     if (view === 'posts') return json(await readRemotePosts(user.userId, profile.data, params.get('status'), Number(params.get('limit') || 50)));
     if (view === 'stats') return json(await readStats(user.userId, profile.data, Number(params.get('days'))));
     if (view === 'queue') return json(await readQueue(user.userId, profile.data));
+    if (view === 'accounts') return json(await readZernioAccounts(user.userId, profile.data));
     return json({ error: 'Неизвестный запрос.' }, 400);
   } catch (error) { return failure(error); }
 }

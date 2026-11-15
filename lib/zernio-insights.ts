@@ -79,7 +79,25 @@ export async function readInstagramFollowers(owner: string, profileId: string, a
   return typeof entry?.current === 'number' ? entry.current : null;
 }
 
-export const CONNECT_PLATFORMS = ['instagram', 'threads'];
+export const CONNECT_PLATFORMS = ['instagram', 'threads', 'tiktok'];
+
+const zernioAccount = z.object({
+  _id: z.string().min(1), platform: z.string(), username: z.string().optional().nullable(), displayName: z.string().optional().nullable(),
+  isActive: z.boolean().optional(), profileId: z.union([z.string(), z.object({ _id: z.string() })]).optional().nullable(),
+});
+/**
+ * What is connected in Zernio for this profile, as Zernio has it now: every network (TikTok too), read only. It is
+ * shown in the profile; the channels the autopilot posts to are still chosen in the profile's settings.
+ */
+export async function readZernioAccounts(owner: string, profileId: string) {
+  const { zernio, rawRemoteId } = await connect(owner, profileId);
+  const { accounts } = parse(z.object({ accounts: z.array(zernioAccount) }), await zernio(`/accounts?profileId=${encodeURIComponent(rawRemoteId)}`));
+  return {
+    accounts: accounts
+      .filter(account => { const remote = typeof account.profileId === 'string' ? account.profileId : account.profileId?._id; return !remote || remote === rawRemoteId; })
+      .map(account => ({ id: account._id, platform: account.platform, username: account.username || account.displayName || null, active: account.isActive !== false })),
+  };
+}
 export async function readConnectUrl(owner: string, profileId: string, platform: string) {
   if (!CONNECT_PLATFORMS.includes(platform)) throw new ProviderError('Эту соцсеть нельзя подключить отсюда.', 400);
   const { zernio, remoteId } = await connect(owner, profileId);

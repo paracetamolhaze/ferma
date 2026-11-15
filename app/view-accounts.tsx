@@ -1,5 +1,5 @@
 "use client";
-/** «Аккаунты»: the owner's own Meta apps, the accounts of every profile and the diagnostics of both. */
+/** «Аккаунты»: the owner's own apps (Meta, Google), the accounts of every profile and the diagnostics of both. */
 import { useEffect, useState } from 'react';
 import { AlertCircle, Check, ImageUp, Plug, RefreshCw, Stethoscope, Trash2 } from 'lucide-react';
 import { CheckList, ErrorLine, FORMAT_NAMES, Loading, send, Spin, useAction, useApi, type Check as CheckRow } from './content-ui';
@@ -9,18 +9,32 @@ type ProviderRow = { provider: string; platform: string; name: string; capabilit
 type MediaTest = { containerId: string; startedAt: string; state: 'pending' | 'ok' | 'fail'; detail: string };
 type AccountRow = { id: string; profileId: string; platform: string; provider: string; username: string | null; accountType: string | null; followers: number | null; status: string; tokenExpiresAt: string | null; lastCheckedAt: string | null; error: string | null; quotaUsed: number | null; quotaTotal: number | null; pausedUntil: string | null; paused: boolean; diagnostics: { at: string; checks: CheckRow[]; mediaTest?: MediaTest | null } | null };
 type AppChecks = { apps: { provider: string; checks: CheckRow[] }[]; media: CheckRow };
-const ROUTE: Record<string, string> = { meta_threads: 'threads', meta_instagram: 'instagram' };
+const ROUTE: Record<string, string> = { meta_threads: 'threads', meta_instagram: 'instagram', youtube: 'youtube' };
+/** Networks connected through the owner's own app, in the order the screens show them. */
+export const OWN_PROVIDERS = [{ provider: 'meta_instagram', platform: 'instagram', name: 'Instagram' }, { provider: 'meta_threads', platform: 'threads', name: 'Threads' }, { provider: 'youtube', platform: 'youtube', name: 'YouTube' }];
+const appTitle = (row: ProviderRow) => row.provider === 'youtube' ? 'Приложение Google для YouTube' : `Приложение Meta для ${row.platform === 'threads' ? 'Threads' : 'Instagram'}`;
+const RETURN_KEY = 'ferma:oauthReturn';
+/**
+ * The network's login page for one profile. The current page is remembered, so after the login the owner comes
+ * back to it (a profile), not only to «Аккаунты».
+ */
+export async function connectUrl(provider: string, profileId: string) {
+  const { url } = await send<{ url: string }>('/api/accounts', { action: 'connect', provider, profileId });
+  try { sessionStorage.setItem(RETURN_KEY, location.hash); } catch { /* private mode: the owner lands on «Аккаунты» */ }
+  return url;
+}
 
 function AppForm({ ctx, row, base, onSaved }: { ctx: Ctx; row: ProviderRow; base: string | null; onSaved: () => void }) {
+  const google = row.provider === 'youtube';
   const [appId, setAppId] = useState(row.app?.appId || '');
   const [secret, setSecret] = useState('');
   const [redirect, setRedirect] = useState(row.app?.redirectUri || (base ? `${base.replace(/\/+$/, '')}/oauth/${ROUTE[row.provider]}` : ''));
   const action = useAction(ctx);
   return <form className="form-stack" onSubmit={event => { event.preventDefault(); void action.run('save', async () => { await send('/api/accounts', { action: 'saveApp', provider: row.provider, appId, appSecret: secret || null, redirectUri: redirect }); setSecret(''); onSaved(); }, 'Приложение сохранено.'); }}>
-    <label>ID приложения<input required inputMode="numeric" value={appId} onChange={event => setAppId(event.target.value)} /></label>
-    <label>Секрет приложения<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)} placeholder={row.app ? 'Сохранён. Введите новый, чтобы заменить' : ''} required={!row.app} /></label>
-    <label>Адрес возврата<input required value={redirect} onChange={event => setRedirect(event.target.value)} placeholder={`https://ваш-домен/ferma/oauth/${ROUTE[row.provider]}`} /></label>
-    <small className="muted">Этот же адрес добавьте в настройках приложения в кабинете Meta for Developers.</small>
+    <label>{google ? 'ID клиента' : 'ID приложения'}<input required inputMode={google ? 'text' : 'numeric'} value={appId} onChange={event => setAppId(event.target.value)} placeholder={google ? '123456-abc….apps.googleusercontent.com' : ''} /></label>
+    <label>{google ? 'Секрет клиента' : 'Секрет приложения'}<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)} placeholder={row.app ? 'Сохранён. Введите новый, чтобы заменить' : ''} required={!row.app} /></label>
+    <label>Адрес возврата<input required value={redirect} onChange={event => setRedirect(event.target.value)} placeholder={`https://ваш-домен/oauth/${ROUTE[row.provider]}`} /></label>
+    <small className="muted">{google ? 'Этот же адрес добавьте в Google Cloud: Google Auth Platform → Клиенты → ваш клиент → «Разрешённые URI перенаправления».' : 'Этот же адрес добавьте в настройках приложения в кабинете Meta for Developers.'}</small>
     <ErrorLine text={action.error} />
     <div><button className="ghost" disabled={Boolean(action.busy)}><Spin on={action.busy === 'save'}><Check size={15} /></Spin>Сохранить</button></div>
   </form>;
@@ -41,9 +55,9 @@ function AccountModal({ ctx, account, profile, close, onChanged }: { ctx: Ctx; a
     <div className="form-body stack">
       <div className="panel-actions">
         <button className="ghost" disabled={Boolean(action.busy)} onClick={() => void action.run('diagnose', async () => { setDiagnostics(await send('/api/accounts', { action: 'diagnose', accountId: account.id })); onChanged(); })}><Spin on={action.busy === 'diagnose'}><Stethoscope size={15} /></Spin>Проверить аккаунт</button>
-        <button className="ghost" disabled={Boolean(action.busy) || account.status !== 'connected'} onClick={() => void action.run('media', async () => { const result = await send<MediaTest>('/api/accounts', { action: 'mediaTest', accountId: account.id }); setDiagnostics(current => ({ at: current?.at || new Date().toISOString(), checks: current?.checks || [], mediaTest: result })); })}><Spin on={action.busy === 'media'}><ImageUp size={15} /></Spin>Проверить картинку через Meta</button>
+        {account.provider !== 'youtube' && <button className="ghost" disabled={Boolean(action.busy) || account.status !== 'connected'} onClick={() => void action.run('media', async () => { const result = await send<MediaTest>('/api/accounts', { action: 'mediaTest', accountId: account.id }); setDiagnostics(current => ({ at: current?.at || new Date().toISOString(), checks: current?.checks || [], mediaTest: result })); })}><Spin on={action.busy === 'media'}><ImageUp size={15} /></Spin>Проверить картинку через Meta</button>}
       </div>
-      <small className="muted">«Проверить аккаунт» только читает: токен, права, лимит, статистику. «Проверить картинку» просит Meta скачать настоящую карточку в скрытый контейнер: он не публикуется и сам удалится через 24 часа.</small>
+      <small className="muted">{account.provider === 'youtube' ? '«Проверить аккаунт» только читает: доступ, канал, права.' : '«Проверить аккаунт» только читает: токен, права, лимит, статистику. «Проверить картинку» просит Meta скачать настоящую карточку в скрытый контейнер: он не публикуется и сам удалится через 24 часа.'}</small>
       <ErrorLine text={action.error} />
       {diagnostics?.checks.length ? <><p className="muted">Проверено {formatDate(diagnostics.at)}</p><CheckList checks={diagnostics.checks} /></> : <p className="muted">Аккаунт ещё не проверялся.</p>}
       {test && <CheckList checks={[{ key: 'media', label: 'Картинка через Meta', state: test.state === 'pending' ? 'skip' : test.state, detail: test.state === 'pending' ? 'Meta скачивает картинку…' : test.detail }]} />}
@@ -64,26 +78,34 @@ export function AccountsView({ ctx }: { ctx: Ctx }) {
     history.replaceState(null, '', '#accounts');
     const state = fields.get('state'), code = fields.get('code');
     if (fields.get('error') || !state || !code) { action.setError(`Соцсеть не выдала доступ: ${fields.get('error_description') || fields.get('error') || 'нет кода'}.`); return; }
-    void action.run('finish', async () => { const result = await send<{ username: string }>('/api/accounts', { action: 'finish', state, code }); await view.reload(); ctx.notify(`Подключён @${result.username}.`); });
+    void action.run('finish', async () => {
+      const result = await send<{ username: string; provider: string }>('/api/accounts', { action: 'finish', state, code });
+      ctx.notify(result.provider === 'youtube' ? `Подключён канал «${result.username}».` : `Подключён @${result.username}.`);
+      // Back to the profile the connection was started from, when it was started in this browser.
+      const back = (() => { try { const value = sessionStorage.getItem(RETURN_KEY); sessionStorage.removeItem(RETURN_KEY); return value; } catch { return null; } })();
+      if (back?.startsWith('#profile/')) ctx.go(back.slice(1)); else await view.reload();
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   if (view.loading && !view.data) return <Loading />;
   const base = engine.data?.settings.publicBaseUrl || null;
   const accounts = view.data?.accounts || [];
-  const providers = (view.data?.providers || []).filter(row => row.provider.startsWith('meta_'));
-  const connect = (provider: string, profileId: string) => action.run(provider + profileId, async () => { const { url } = await send<{ url: string }>('/api/accounts', { action: 'connect', provider, profileId }); location.href = url; });
+  const providers = (view.data?.providers || []).filter(row => ROUTE[row.provider]);
+  const connect = (provider: string, profileId: string) => action.run(provider + profileId, async () => { location.href = await connectUrl(provider, profileId); });
   return <div className="stack">
     <ErrorLine text={view.error || action.error} />
     {action.busy === 'finish' && <Loading text="Завершаем подключение…" />}
-    {!base && <p className="notice-bad"><AlertCircle size={15} /><span>Не задан публичный адрес FERMA (Настройки → Публикации). Без него Meta не вернёт вас после входа и не сможет забрать картинки.</span></p>}
+    {!base && <p className="notice-bad"><AlertCircle size={15} /><span>Не задан публичный адрес FERMA (Настройки → Публикации). Без него соцсеть не вернёт вас после входа и не сможет забрать картинки.</span></p>}
     <div className="columns">{providers.map(row => {
       const appChecks = checks?.apps.find(entry => entry.provider === row.provider)?.checks;
       return <section className="panel" key={row.provider}>
-        <header className="panel-head"><h2>Приложение Meta для {row.platform === 'threads' ? 'Threads' : 'Instagram'}</h2>{row.app ? <span className="pill good">Сохранено</span> : <span className="pill plain">Не добавлено</span>}</header>
+        <header className="panel-head"><h2>{appTitle(row)}</h2>{row.app ? <span className="pill good">Сохранено</span> : <span className="pill plain">Не добавлено</span>}</header>
         <div className="panel-body stack">
           <AppForm key={`${row.provider}:${row.app?.redirectUri || ''}:${base || ''}`} ctx={ctx} row={row} base={base} onSaved={() => { setChecks(null); void view.reload(); }} />
           {appChecks && <CheckList checks={appChecks} />}
-          <small className="muted">Форматы: {row.capabilities.formats.map(format => FORMAT_NAMES[format] || format).join(', ').toLowerCase()}. Текст до {row.capabilities.maxText} знаков, карусель до {row.capabilities.maxCarousel} картинок, до {row.capabilities.dailyLimit} публикаций в сутки на аккаунт. Публикует сама FERMA в назначенное время: компьютер должен быть включён.</small>
+          {row.provider === 'youtube'
+            ? <small className="muted">Подключение канала работает уже сейчас. {row.capabilities.inactive}</small>
+            : <small className="muted">Форматы: {row.capabilities.formats.map(format => FORMAT_NAMES[format] || format).join(', ').toLowerCase()}. Текст до {row.capabilities.maxText} знаков, карусель до {row.capabilities.maxCarousel} картинок, до {row.capabilities.dailyLimit} публикаций в сутки на аккаунт. Публикует сама FERMA в назначенное время: компьютер должен быть включён.</small>}
         </div>
       </section>;
     })}</div>
@@ -95,13 +117,13 @@ export function AccountsView({ ctx }: { ctx: Ctx }) {
     <section className="panel">
       <header className="panel-head"><h2>Аккаунты профилей</h2><button className="ghost small" disabled={Boolean(action.busy)} onClick={() => void action.run('all', async () => { const result = await send<{ checked: number }>('/api/accounts', { action: 'diagnoseAll' }); await view.reload(); ctx.notify(`Проверено аккаунтов: ${result.checked}.`); })}><Spin on={action.busy === 'all'}><RefreshCw size={14} /></Spin>Проверить все</button></header>
       <div className="table-scroll"><table>
-        <thead><tr><th>Профиль</th><th>Threads</th><th>Instagram</th></tr></thead>
+        <thead><tr><th>Профиль</th><th>Threads</th><th>Instagram</th><th>YouTube</th></tr></thead>
         <tbody>{ctx.state.profiles.map(profile => <tr key={profile.id}>
           <td><span className="who"><Avatar profile={profile} /><strong>{profile.name}</strong></span></td>
-          {['meta_threads', 'meta_instagram'].map(provider => {
+          {['meta_threads', 'meta_instagram', 'youtube'].map(provider => {
             const account = accounts.find(row => row.profileId === profile.id && row.provider === provider && row.status !== 'disabled');
             const app = providers.find(row => row.provider === provider)?.app;
-            if (!account) return <td key={provider}><button className="ghost small" disabled={!app || !base || Boolean(action.busy)} title={!app ? 'Сначала сохраните приложение Meta' : !base ? 'Сначала задайте публичный адрес' : ''} onClick={() => void connect(provider, profile.id)}><Plug size={14} />Подключить</button></td>;
+            if (!account) return <td key={provider}><button className="ghost small" disabled={!app || !base || Boolean(action.busy)} title={!app ? 'Сначала сохраните приложение' : !base ? 'Сначала задайте публичный адрес' : ''} onClick={() => void connect(provider, profile.id)}><Plug size={14} />Подключить</button></td>;
             const problems = account.diagnostics?.checks.filter(check => check.state === 'fail' || check.state === 'warn').length || 0;
             return <td key={provider}><div className="post-text">
               <span className="field-row"><Network platform={account.platform} username={account.username} /><StatusPill status={account.status} /></span>
@@ -118,7 +140,7 @@ export function AccountsView({ ctx }: { ctx: Ctx }) {
           })}
         </tr>)}</tbody>
       </table></div>
-      <div className="panel-note"><small className="muted">У каждого аккаунта свой токен: он хранится зашифрованным и продлевается сам за 15 дней до конца. Instagram публикует через API только профессиональные аккаунты (автор или бизнес). Прокси не используются.</small></div>
+      <div className="panel-note"><small className="muted">У каждого аккаунта свой токен, он хранится зашифрованным и продлевается сам: у Meta за 15 дней до конца, у Google каждый час. Instagram публикует через API только профессиональные аккаунты (автор или бизнес). Прокси не используются.</small></div>
     </section>
     {open && <AccountModal ctx={ctx} account={open} profile={ctx.state.profiles.find(profile => profile.id === open.profileId)} close={() => setOpen(null)} onChanged={() => void view.reload()} />}
   </div>;

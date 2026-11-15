@@ -23,8 +23,12 @@ export type Capabilities = {
   inactive?: string;
 };
 
-/** scopes: the permissions the network listed when it gave the token (Instagram does; Threads answers debug_token). */
-export type Token = { accessToken: string; userId: string; expiresAt: string | null; obtainedAt: string; scopes?: string[] | null };
+/**
+ * scopes: the permissions the network listed when it gave the token (Instagram does; Threads answers debug_token).
+ * refreshToken: Google's long key that renews the hour-long access token; refreshExpiresAt: when Google ends it
+ * (only for apps in testing), null when it has no end.
+ */
+export type Token = { accessToken: string; userId: string; expiresAt: string | null; obtainedAt: string; scopes?: string[] | null; refreshToken?: string | null; refreshExpiresAt?: string | null };
 export type RemoteAccount = { id: string; username: string; name?: string | null; accountType?: string | null; followers?: number | null; picture?: string | null };
 /** aiImagery: the pictures were made by an image model; Threads gets its «made with AI» mark. */
 export type PublishRequest = { format: Format; text: string; mediaUrls: string[]; aiImagery?: boolean };

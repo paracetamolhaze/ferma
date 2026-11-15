@@ -60,6 +60,7 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
         accept: i => v.acceptTexts(i.owner, i.itemId, i.revision, i.variants), edit: i => v.editVariant(i.owner, i.variantId, i), variants: i => v.variantsOverview(i.owner, { itemId: i.itemId }),
         claimRender: i => v.claimRender(i.owner, i.now), renderGudini: i => v.renderWithGudini(i.owner, i.jobId), fixedContent: i => v.fixedContent(i.owner, i.jobId, i), completeRender: i => v.completeRender(i.owner, i.jobId, i.files, {}),
         saveApp: i => acc.saveApp(i.owner, i.provider, i), connect: i => acc.startConnect(i.owner, i.profileId, i.provider), finish: i => acc.finishConnect(i.owner, i.state, i.code), accounts: i => acc.accountsOverview(i.owner),
+        checkAccounts: i => acc.checkAccounts(i.owner, fetch, i.now),
         editorial: i => d.saveEditorial(i.owner, i.profileId, i), campaign: i => d.saveCampaign(i.owner, i), campaignStatus: i => d.setCampaignStatus(i.owner, i.id, i.status), preview: i => d.previewCampaign(i.owner, i.id, i.now),
         distribute: i => d.distributeTick(i.owner, { nowMs: i.now }), tick: i => q.publicationTick(i.owner, { nowMs: i.now }), stats: i => q.syncStats(i.owner, { nowMs: i.now }), queue: i => q.queueOverview(i.owner),
         approve: i => q.approve(i.owner, i.id), events: i => q.publicationEventsOf(i.owner, i.id),
@@ -116,6 +117,8 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   // When the post whose answer is lost appears in the account (set on the test's own clock).
   let igPostAt = new Date(NOW + 3600_000).toISOString();
   let threadsContainer = 0, threadsPosts = 0, igContainer = 0, igPublishMode = 'ok', igContainerStatus = 'FINISHED', igPublished = null, threadsLimitOnce = false, threadsPublishLost = false;
+  const googleCalls = [];
+  let googleRefreshes = 0, googleRevoked = false;
   const publishedContainers = new Set();
   const THREADS_SCOPES = ['threads_basic', 'threads_content_publish', 'threads_manage_insights', 'threads_read_replies', 'threads_manage_replies'];
   const mf = new Miniflare({
@@ -186,6 +189,17 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
         }
         if (url.pathname === '/v1.0/th-1/threads_publishing_limit') return Response.json({ data: [{ quota_usage: 1, config: { quota_total: 250 } }] });
         if (url.pathname === '/v1.0/th-1/threads_insights') return Response.json({ data: [{ name: 'views', total_value: { value: 10 } }] });
+      }
+      if (url.hostname === 'oauth2.googleapis.com' && url.pathname === '/token') {
+        googleCalls.push(form);
+        const scope = 'https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly https://www.googleapis.com/auth/yt-analytics.readonly';
+        if (form.client_secret !== 'g'.repeat(35)) return Response.json({ error: 'invalid_client', error_description: 'Unauthorized' }, { status: 401 });
+        if (form.grant_type === 'authorization_code') return form.code === 'g-code' ? Response.json({ access_token: 'ya29.first', refresh_token: 'rt-1', expires_in: 3599, scope, token_type: 'Bearer' }) : Response.json({ error: 'invalid_grant', error_description: 'Bad Request' }, { status: 400 });
+        if (form.grant_type === 'refresh_token') return googleRevoked || form.refresh_token !== 'rt-1' ? Response.json({ error: 'invalid_grant', error_description: 'Token has been expired or revoked.' }, { status: 400 }) : Response.json({ access_token: `ya29.renewed${++googleRefreshes}`, expires_in: 3599, scope, token_type: 'Bearer' });
+      }
+      if (url.hostname === 'www.googleapis.com' && url.pathname === '/youtube/v3/channels') {
+        if (!(request.headers.get('authorization') || '').startsWith('Bearer ya29.')) return Response.json({ error: { code: 401, message: 'Invalid Credentials', errors: [{ reason: 'authError' }] } }, { status: 401 });
+        return Response.json({ items: [{ id: 'UCnews', snippet: { title: 'News Daily', customUrl: '@newsdaily', thumbnails: { default: { url: 'https://yt3.example/a.jpg' } } }, statistics: { subscriberCount: '42', hiddenSubscriberCount: false } }] });
       }
       if (url.hostname === 'api.instagram.com' && url.pathname === '/oauth/access_token') return Response.json({ data: [{ access_token: 'short-ig', user_id: 'ig-app-1', permissions: 'instagram_business_basic' }] });
       if (url.hostname === 'graph.instagram.com') {
@@ -348,6 +362,39 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   assert.deepEqual(accounts.map(row => [row.platform, row.username, row.status]), [['instagram', 'news_daily_ig', 'connected'], ['threads', 'news_daily', 'connected']]);
   assert.ok(accounts.every(row => !row.encryptedToken.includes('long-')), 'tokens are encrypted');
   assert.equal((await call({ owner: 'intruder', action: 'connect', provider: 'meta_threads', profileId: P })).status, 404);
+
+  // ---- 6b. YouTube through the owner's own Google app: the channel connects; its hour-long access renews by itself
+  const GOOGLE_ID = '345772383702-abcdefghijklmnopq.apps.googleusercontent.com';
+  assert.equal((await call({ action: 'saveApp', provider: 'youtube', appId: '1234567', appSecret: 'g'.repeat(35), redirectUri: 'https://pub.test/ferma/oauth/youtube' })).status, 400, 'a Google client ID has its own form');
+  await ok({ action: 'saveApp', provider: 'youtube', appId: GOOGLE_ID, appSecret: 'g'.repeat(35), redirectUri: 'https://pub.test/ferma/oauth/youtube' });
+  const ytStart = new URL((await ok({ action: 'connect', provider: 'youtube', profileId: P })).url);
+  assert.equal(ytStart.origin + ytStart.pathname, 'https://accounts.google.com/o/oauth2/v2/auth');
+  assert.deepEqual([ytStart.searchParams.get('client_id'), ytStart.searchParams.get('access_type'), ytStart.searchParams.get('redirect_uri')], [GOOGLE_ID, 'offline', 'https://pub.test/ferma/oauth/youtube']);
+  assert.match(ytStart.searchParams.get('scope'), /youtube\.upload/);
+  assert.match(ytStart.searchParams.get('state'), /^yt_/);
+  assert.equal((await call({ action: 'finish', state: ytStart.searchParams.get('state'), code: 'wrong-code' })).status, 502, 'a refused code connects nothing');
+  const ytAgain = new URL((await ok({ action: 'connect', provider: 'youtube', profileId: P })).url);
+  const connectedChannel = await ok({ action: 'finish', state: ytAgain.searchParams.get('state'), code: 'g-code' });
+  assert.deepEqual([connectedChannel.username, connectedChannel.provider], ['newsdaily', 'youtube']);
+  const channel = (await rows("SELECT id, username, name, followers, status, encryptedToken, tokenExpiresAt FROM social_accounts WHERE provider = 'youtube'"))[0];
+  assert.deepEqual([channel.username, channel.name, channel.followers, channel.status, channel.tokenExpiresAt], ['newsdaily', 'News Daily', 42, 'connected', null], 'no end of access: Google set none');
+  assert.ok(!channel.encryptedToken.includes('rt-1') && !channel.encryptedToken.includes('ya29'), 'the refresh key is encrypted');
+  // An hour later the access is renewed with the app's keys; the channel stays connected.
+  await ok({ action: 'checkAccounts', now: Date.now() + 2 * 3600_000 });
+  assert.ok(googleCalls.some(entry => entry.grant_type === 'refresh_token' && entry.client_id === GOOGLE_ID), 'renewed with the app\'s keys');
+  assert.equal((await rows(`SELECT status FROM social_accounts WHERE id = '${channel.id}'`))[0].status, 'connected');
+  const ytDiagnostics = await ok({ action: 'diagnose', accountId: channel.id, now: Date.now() + 2 * 3600_000 });
+  const ytChecks = Object.fromEntries(ytDiagnostics.checks.map(check => [check.key, check.state]));
+  assert.deepEqual([ytChecks.token, ytChecks.profile, ytChecks.scopes, ytChecks.publish], ['ok', 'ok', 'ok', 'skip'], JSON.stringify(ytDiagnostics.checks));
+  assert.ok(!('quota' in ytChecks) && !('insights' in ytChecks), 'Meta\'s checks are not asked of Google');
+  // Google takes the key back: the channel is marked for a new login, nothing else breaks.
+  googleRevoked = true;
+  await ok({ action: 'checkAccounts', now: Date.now() + 4 * 3600_000 });
+  assert.equal((await rows(`SELECT status FROM social_accounts WHERE id = '${channel.id}'`))[0].status, 'expired');
+  googleRevoked = false;
+  const ytBack = new URL((await ok({ action: 'connect', provider: 'youtube', profileId: P })).url);
+  await ok({ action: 'finish', state: ytBack.searchParams.get('state'), code: 'g-code' });
+  assert.equal((await rows(`SELECT status FROM social_accounts WHERE id = '${channel.id}'`))[0].status, 'connected', 'logging in again brings it back');
 
   // ---- 7a. Texts of the carousel versions: Gudini's fields, Gudini's limits, facts only from the material
   const carouselId = (await rows(`SELECT id, revision FROM source_items WHERE externalId = '${CAROUSEL}'`))[0];

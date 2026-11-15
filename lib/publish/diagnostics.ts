@@ -1,5 +1,5 @@
 /**
- * Diagnostics of the Meta connection. Nothing here publishes anything.
+ * Diagnostics of the connections (Meta for Threads and Instagram, Google for YouTube). Nothing here publishes anything.
  *  - The app: saved and readable, its return address leads to FERMA's public route, its keys (Threads checks them
  *    with an app token; Instagram has no such check, its keys are checked when an account connects).
  *  - Each account: token (readable, valid, expiry), granted permissions, profile, publishing quota, insights.
@@ -12,23 +12,24 @@ import { and, desc, eq, isNotNull } from 'drizzle-orm';
 import { getDb } from '@/db';
 import { socialAccounts, sourceAssets, variantAssets } from '@/db/schema';
 import { readSettings } from '../content/gudini-source';
-import { AccountError, freshToken, readApp, tokenOf } from './accounts';
+import { AccountError, freshToken, readApp, tokenOf, type AppProvider } from './accounts';
 import { INSTAGRAM_GRAPH, INSTAGRAM_SCOPES } from './instagram';
 import { graphClient, str } from './meta';
 import { signedMediaUrl } from './public-media';
 import { adapterFor } from './registry';
 import { THREADS_GRAPH, THREADS_SCOPES } from './threads';
 import { PublishError, type MetaApp, type Provider, type Token } from './types';
+import { YOUTUBE_SCOPES, youtubeCapabilities } from './youtube';
 
 export type CheckState = 'ok' | 'warn' | 'fail' | 'skip';
 export type Check = { key: string; label: string; state: CheckState; detail: string };
-type MetaProvider = 'meta_threads' | 'meta_instagram';
+type MetaProvider = AppProvider;
 type Account = typeof socialAccounts.$inferSelect;
 export type MediaTest = { containerId: string; startedAt: string; state: 'pending' | 'ok' | 'fail'; detail: string };
 export type AccountDiagnostics = { at: string; checks: Check[]; mediaTest?: MediaTest | null };
 
-const NAMES: Record<MetaProvider, string> = { meta_threads: 'Threads', meta_instagram: 'Instagram' };
-const ROUTES: Record<MetaProvider, string> = { meta_threads: 'threads', meta_instagram: 'instagram' };
+const NAMES: Record<MetaProvider, string> = { meta_threads: 'Threads', meta_instagram: 'Instagram', youtube: 'YouTube' };
+const ROUTES: Record<MetaProvider, string> = { meta_threads: 'threads', meta_instagram: 'instagram', youtube: 'youtube' };
 const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const reason = (error: unknown) => error instanceof PublishError ? `${error.message}${error.detail ? ` (${error.detail})` : ''}` : error instanceof Error ? error.message : 'неизвестная ошибка';
 const owned = async (owner: string, accountId: string) => {
@@ -41,7 +42,7 @@ const owned = async (owner: string, accountId: string) => {
 async function returnAddressChecks(app: MetaApp, provider: MetaProvider, base: string | null, request: typeof fetch): Promise<Check[]> {
   const checks: Check[] = [];
   const expected = base ? `${base}/oauth/${ROUTES[provider]}` : null;
-  if (!expected) checks.push({ key: 'base', label: 'Публичный адрес', state: 'fail', detail: 'Не задан публичный адрес FERMA (Публикации → Настройки): без него Meta не вернёт вас после входа и не скачает картинки.' });
+  if (!expected) checks.push({ key: 'base', label: 'Публичный адрес', state: 'fail', detail: 'Не задан публичный адрес FERMA (Публикации → Настройки): без него соцсеть не вернёт вас после входа и не скачает картинки.' });
   else if (app.redirectUri !== expected) checks.push({ key: 'redirect', label: 'Адрес возврата', state: 'warn', detail: `Сохранён ${app.redirectUri}, а публичный адрес FERMA ведёт на ${expected}. Адрес должен совпадать здесь и в кабинете Meta.` });
   try {
     const response = await request(app.redirectUri, { redirect: 'manual', signal: AbortSignal.timeout(10_000) });
@@ -67,20 +68,20 @@ async function threadsKeys(app: MetaApp, request: typeof fetch): Promise<Check> 
   }
 }
 
-/** The «Аккаунты» checks of both apps. */
+/** The «Аккаунты» checks of every app: Meta for Threads and Instagram, Google for YouTube. */
 export async function appDiagnostics(owner: string, request: typeof fetch = fetch) {
   const settings = await readSettings(owner);
   const base = settings.publicBaseUrl?.replace(/\/+$/, '') || null;
   const result: { provider: MetaProvider; checks: Check[] }[] = [];
-  for (const provider of ['meta_threads', 'meta_instagram'] as const) {
+  for (const provider of ['meta_threads', 'meta_instagram', 'youtube'] as const) {
     let app: MetaApp | null;
     try { app = await readApp(owner, provider); }
     catch { result.push({ provider, checks: [{ key: 'app', label: 'Приложение', state: 'fail', detail: 'Секрет приложения не читается. Сохраните приложение заново.' }] }); continue; }
-    if (!app) { result.push({ provider, checks: [{ key: 'app', label: 'Приложение', state: 'fail', detail: `Приложение Meta для ${NAMES[provider]} не добавлено.` }] }); continue; }
+    if (!app) { result.push({ provider, checks: [{ key: 'app', label: 'Приложение', state: 'fail', detail: `${provider === 'youtube' ? 'Приложение Google' : 'Приложение Meta'} для ${NAMES[provider]} не добавлено.` }] }); continue; }
     const checks: Check[] = [{ key: 'app', label: 'Приложение', state: 'ok', detail: `ID ${app.appId}. Секрет хранится в зашифрованном виде.` }];
     checks.push(...await returnAddressChecks(app, provider, base, request));
     checks.push(provider === 'meta_threads' ? await threadsKeys(app, request)
-      : { key: 'keys', label: 'Ключи приложения', state: 'skip', detail: 'Meta не даёт проверить ключи Instagram без входа. Они проверятся, когда вы подключите аккаунт.' });
+      : { key: 'keys', label: 'Ключи приложения', state: 'skip', detail: provider === 'youtube' ? 'Google не даёт проверить ключи без входа. Они проверятся, когда вы подключите канал.' : 'Meta не даёт проверить ключи Instagram без входа. Они проверятся, когда вы подключите аккаунт.' });
     result.push({ provider, checks });
   }
   return { apps: result };
@@ -88,7 +89,8 @@ export async function appDiagnostics(owner: string, request: typeof fetch = fetc
 
 /** What the token itself says: Threads answers debug_token; Instagram listed the permissions when it gave the token. */
 async function grantedScopes(owner: string, account: Account, token: Token, request: typeof fetch) {
-  if (account.provider === 'meta_instagram') return { scopes: token.scopes ?? null, dataAccessUntil: null as number | null };
+  // Instagram and Google listed the permissions when they gave the token.
+  if (account.provider === 'meta_instagram' || account.provider === 'youtube') return { scopes: token.scopes ?? null, dataAccessUntil: null as number | null };
   const app = await readApp(owner, 'meta_threads');
   if (!app) throw new AccountError('Приложение Meta для Threads не добавлено.', 409);
   const body = await graphClient(request, 15_000)('GET', `${THREADS_GRAPH}/v1.0/debug_token`, { input_token: token.accessToken, access_token: `TH|${app.appId}|${app.appSecret}` });
@@ -123,7 +125,15 @@ export async function diagnoseAccount(owner: string, accountId: string, request:
   let token: Token;
   try { token = await tokenOf(owner, account); }
   catch (error) { checks.push({ key: 'token', label: 'Токен', state: 'fail', detail: reason(error) }); return finish(); }
-  if (token.expiresAt) {
+  const youtube = account.provider === 'youtube';
+  if (youtube) {
+    // Google's access token lives an hour and is renewed by itself; what matters is the refresh key.
+    const until = token.refreshExpiresAt ? Date.parse(token.refreshExpiresAt) : null;
+    checks.push(!token.refreshToken ? { key: 'token', label: 'Токен', state: 'fail', detail: 'Нет ключа продления. Подключите канал заново.' }
+      : until === null ? { key: 'token', label: 'Токен', state: 'ok', detail: 'Ключ продления без срока: доступ продлевается сам каждый час.' }
+      : { key: 'token', label: 'Токен', state: until - nowMs < 2 * 86_400_000 ? 'warn' : 'ok', detail: `Ключ продления действует до ${day(until)}: у приложения Google в режиме тестирования вход живёт 7 дней, потом канал подключают заново.` });
+    if (!token.refreshToken || (until !== null && until <= nowMs)) return finish();
+  } else if (token.expiresAt) {
     const left = Date.parse(token.expiresAt) - nowMs;
     const days = Math.floor(left / 86_400_000);
     checks.push(left <= 0 ? { key: 'token', label: 'Токен', state: 'fail', detail: `Токен истёк ${day(Date.parse(token.expiresAt))}. Подключите аккаунт заново.` }
@@ -136,11 +146,12 @@ export async function diagnoseAccount(owner: string, accountId: string, request:
   try {
     const remote = await adapter.checkConnection(token);
     const professional = account.provider !== 'meta_instagram' || ['BUSINESS', 'MEDIA_CREATOR', 'CREATOR'].includes((remote.accountType || '').toUpperCase());
-    checks.push(professional ? { key: 'profile', label: 'Профиль', state: 'ok', detail: `@${remote.username}${remote.accountType ? ` (${remote.accountType})` : ''}.` }
+    checks.push(youtube ? { key: 'profile', label: 'Канал', state: 'ok', detail: `«${remote.name || remote.username}»${remote.followers !== null && remote.followers !== undefined ? `, подписчиков: ${remote.followers}` : ''}.` }
+      : professional ? { key: 'profile', label: 'Профиль', state: 'ok', detail: `@${remote.username}${remote.accountType ? ` (${remote.accountType})` : ''}.` }
       : { key: 'profile', label: 'Профиль', state: 'fail', detail: `@${remote.username}: не профессиональный аккаунт. Instagram публикует через API только бизнес-аккаунты и аккаунты авторов.` });
   } catch (error) { checks.push({ key: 'profile', label: 'Профиль', state: 'fail', detail: reason(error) }); return finish(); }
   try {
-    const needed = account.provider === 'meta_threads' ? THREADS_SCOPES : INSTAGRAM_SCOPES;
+    const needed = account.provider === 'meta_threads' ? THREADS_SCOPES : youtube ? YOUTUBE_SCOPES : INSTAGRAM_SCOPES;
     const { scopes, dataAccessUntil } = await grantedScopes(owner, account, token, request);
     if (!scopes) checks.push({ key: 'scopes', label: 'Права', state: 'warn', detail: 'Список выданных прав неизвестен: аккаунт подключён до этой версии FERMA. Подключите его заново.' });
     else {
@@ -151,6 +162,8 @@ export async function diagnoseAccount(owner: string, accountId: string, request:
     // Meta's separate limit on data access (about 90 days after the last login): after it the owner logs in again.
     if (dataAccessUntil && dataAccessUntil - nowMs < 14 * 86_400_000) checks.push({ key: 'data_access', label: 'Доступ к данным', state: dataAccessUntil < nowMs ? 'fail' : 'warn', detail: `Meta закрывает доступ к данным аккаунта ${day(dataAccessUntil)}. До этого подключите аккаунт заново.` });
   } catch (error) { checks.push({ key: 'scopes', label: 'Права', state: error instanceof PublishError && error.kind === 'auth' ? 'fail' : 'warn', detail: `Права не проверены: ${reason(error)}` }); }
+  // The publishing limit and the statistics below are Meta's; YouTube publishing comes with the video stage.
+  if (youtube) { checks.push({ key: 'publish', label: 'Публикация', state: 'skip', detail: youtubeCapabilities.inactive! }); return finish(); }
   try {
     const quota = await adapter.quota(token);
     checks.push(quota ? { key: 'quota', label: 'Лимит публикаций', state: quota.used >= quota.total ? 'warn' : 'ok', detail: `Использовано ${quota.used} из ${quota.total} за последние 24 часа.` }

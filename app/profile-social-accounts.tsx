@@ -59,7 +59,7 @@ export default function ProfileSocialAccounts({ profileId, configured, revision,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId, configured, revision]);
   return <section className="profile-social-section">
-    <div className="section-title"><h3>Социальные сети</h3><span>{channels.length} / 2</span></div>
+    <div className="section-title"><h3>Соцсети автопилота в Zernio</h3><span>{channels.length} / 2</span></div>
     <p className="muted">Откроется вход в соцсеть. После входа вернитесь сюда, и аккаунт появится сам.</p>
     <div className="social-import-actions">{PROFILE_NETWORKS.filter(platform => !connectedPlatforms.includes(platform)).map(platform => <button key={platform} className="primary" disabled={busy || !configured} onClick={() => void connect(platform)}><Plus size={15} />Подключить {NETWORKS.find(network => network.id === platform)?.name}</button>)}<a href="https://zernio.com" target="_blank" rel="noreferrer" className="secondary"><ExternalLink size={15} />Открыть Zernio</a><button className="secondary" disabled={busy || !configured} onClick={() => void sync()}>{busy ? <Loader2 size={15} className="spin" /> : <RefreshCw size={15} />}{busy ? 'Загружаем соцсети…' : 'Обновить соцсети'}</button></div>
     {error && <p className="error-text" role="alert">{error}</p>}

@@ -13,6 +13,8 @@ import { ProfileAccess } from './access-panels';
 import { AvatarPanel } from './avatar-panel';
 import { SocialPanel } from './social-panel';
 import { AutopilotPanel } from './autopilot-panel';
+import { useApi } from './content-ui';
+import { ProfileConnections, type OwnAccounts } from './profile-connections';
 import { Avatar, connectedNetworks, CopyButton, Empty, formatTime, needsSetup, Network, networkName, Segmented, useZernio, type Ctx, type Profile, type State } from './shared';
 import { PostsPanel, QueueEditor } from './view-posts';
 import { StatsPanel } from './view-stats';
@@ -86,10 +88,13 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
   const { state } = ctx;
   const profile = state.profiles.find(item => item.id === id);
   const [revision, setRevision] = useState(0);
+  const own = useApi<OwnAccounts>('/api/accounts', 60000);
   if (!profile) return <Empty title="Профиль не найден" action={<button className="ghost" onClick={() => ctx.go('profiles')}>К списку профилей</button>} />;
   const current: Tab = TABS.some(item => item.id === tab) ? tab as Tab : 'autopilot';
   const channels = state.channels.filter(channel => channel.profileId === id);
-  const connected = connectedNetworks(id, state);
+  // Connected through Zernio or directly through the owner's apps: either counts.
+  const ownConnected = (own.data?.accounts || []).filter(account => account.profileId === id && account.status === 'connected');
+  const connected = [...new Set([...connectedNetworks(id, state), ...ownConnected.map(account => account.platform)])];
   const steps = [
     { done: profile.configured, text: 'Добавьте ключ Zernio' },
     { done: Boolean(profile.avatar), text: 'Загрузите аватарку' },
@@ -105,7 +110,8 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
       <div className="profile-title">
         <h1>{profile.name}</h1>
         <div className="profile-meta">
-          {channels.filter(channel => channel.state === 'connected').map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
+          {ownConnected.map(account => <Network key={account.id} platform={account.platform} username={account.username} />)}
+          {channels.filter(channel => channel.state === 'connected' && !ownConnected.some(account => account.platform === channel.platform)).map(channel => <Network key={channel.id} platform={channel.platform} username={channel.username} />)}
           {!connected.length && <span className="muted">Соцсети не подключены</span>}
         </div>
       </div>
@@ -114,6 +120,7 @@ export function ProfilePage({ ctx, id, tab }: { ctx: Ctx; id: string; tab?: stri
     </header>
     {steps.some(step => !step.done) && <div className="setup-steps">{steps.filter(step => !step.done).map(step =>
       <button key={step.text} onClick={() => step.text.includes('почты') ? open('overview') : open('settings')}><AlertCircle size={15} />{step.text}</button>)}</div>}
+    <ProfileConnections key={`connections-${profile.id}`} ctx={ctx} profile={profile} own={own.data} onOpenSettings={() => open('settings')} />
     <nav className="tabs" aria-label="Разделы профиля">{TABS.map(item => <button key={item.id} aria-current={current === item.id ? 'page' : undefined} onClick={() => open(item.id)}>{item.text}</button>)}</nav>
     {current === 'overview' && <div className="columns">
       <ProfileMail key={profile.id} profileId={id} emailLocal={profile.emailLocal} domain={state.mail?.domain || null} onSaved={ctx.reload} onOpenSettings={() => ctx.go('settings')} />

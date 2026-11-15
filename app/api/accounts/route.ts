@@ -10,9 +10,10 @@ const failure = (error: unknown) => error instanceof AccountError ? json({ error
   : error instanceof PublishError ? json({ error: error.message }, error.kind === 'auth' ? 409 : 502)
   : json({ error: 'Не удалось выполнить действие с аккаунтом.' }, 500);
 const id = z.string().uuid();
-const provider = z.enum(['meta_threads', 'meta_instagram']);
+const provider = z.enum(['meta_threads', 'meta_instagram', 'youtube']);
 const inputSchema = z.discriminatedUnion('action', [
-  z.object({ action: z.literal('saveApp'), provider, appId: z.string().max(40), appSecret: z.string().max(200).nullish(), redirectUri: z.string().max(300) }),
+  // A Google client ID is about 72 characters (digits-letters.apps.googleusercontent.com); Meta's IDs are digits.
+  z.object({ action: z.literal('saveApp'), provider, appId: z.string().max(120), appSecret: z.string().max(200).nullish(), redirectUri: z.string().max(300) }),
   z.object({ action: z.literal('connect'), provider, profileId: id }),
   z.object({ action: z.literal('finish'), state: z.string().min(10).max(100), code: z.string().min(4).max(2000) }),
   z.object({ action: z.literal('check') }),

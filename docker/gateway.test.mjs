@@ -104,6 +104,7 @@ test('Own devices through the domain: one password, a signed cookie, no way arou
   assert.equal(seen.headers['oai-authenticated-user-id'], 'ferma_docker_owner');
   assert.equal(seen.headers['x-forwarded-host'], undefined);
   assert.equal(seen.headers.cookie, 'theme=dark');
+  assert.equal(seen.headers.origin, `http://${HOST}`, 'the checked origin reaches the app as its own address');
   assert.equal(seen.body, '{"a":1}');
 
   // Another site: no writes even with the cookie; only the start page may be opened as a page (Meta's return).
@@ -129,10 +130,12 @@ test('Meta\'s return goes to the owner page set for this computer or the domain'
   const gateway = createPublicGateway(1, 'https://ferma.example.org/').listen(0, '127.0.0.1');
   await once(gateway, 'listening');
   t.after(() => gateway.close());
-  const response = await new Promise((resolve, reject) => {
-    http.get({ hostname: '127.0.0.1', port: gateway.address().port, path: '/oauth/instagram?code=abc&state=ig_1&extra=x' }, resolve).on('error', reject);
+  const back = path => new Promise((resolve, reject) => {
+    http.get({ hostname: '127.0.0.1', port: gateway.address().port, path }, response => { response.resume(); resolve(response); }).on('error', reject);
   });
-  response.resume();
+  const response = await back('/oauth/instagram?code=abc&state=ig_1&extra=x');
   assert.equal(response.statusCode, 302);
   assert.equal(response.headers.location, 'https://ferma.example.org/#accounts/oauth?provider=instagram&code=abc&state=ig_1');
+  assert.equal((await back('/oauth/youtube?code=g&state=yt_1&scope=x')).headers.location, 'https://ferma.example.org/#accounts/oauth?provider=youtube&code=g&state=yt_1', 'Google returns the same way');
+  assert.equal((await back('/oauth/tiktok?code=x')).statusCode, 404);
 });

@@ -7,11 +7,14 @@ import http from 'node:http';
 const allowedHosts = new Set((process.env.FERMA_HOSTS || 'localhost:3100,127.0.0.1:3100').split(',').map(host => host.trim()).filter(Boolean));
 
 /** Passes a request on to the app as the owner. Identity headers that came with the request are never trusted. */
-function proxyAsOwner(request, response, upstreamPort, { dropCookie = null, responseHeaders = {} } = {}) {
+function proxyAsOwner(request, response, upstreamPort, { dropCookie = null, responseHeaders = {}, origin = null } = {}) {
   const headers = { ...request.headers };
   for (const name of Object.keys(headers)) {
     if (name.startsWith('oai-') || name.startsWith('cf-') || name.startsWith('x-forwarded-') || name === 'forwarded') delete headers[name];
   }
+  // The app is reached over plain HTTP and compares a write's Origin with its own address: an origin the gateway
+  // has already checked is passed on in that form.
+  if (origin && headers.origin) headers.origin = origin;
   if (dropCookie && headers.cookie) {
     const rest = headers.cookie.split(/;\s*/).filter(part => part && !part.startsWith(`${dropCookie}=`)).join('; ');
     if (rest) headers.cookie = rest; else delete headers.cookie;
@@ -176,14 +179,14 @@ export function createRemoteGateway(upstreamPort = 8787, { password = process.en
       }
       return;
     }
-    proxyAsOwner(request, response, upstreamPort, { dropCookie: SESSION_COOKIE, responseHeaders: { 'X-Frame-Options': 'DENY' } });
+    proxyAsOwner(request, response, upstreamPort, { dropCookie: SESSION_COOKIE, responseHeaders: { 'X-Frame-Options': 'DENY' }, origin: `http://${host}` });
   });
 }
 
 /**
  * The public side, reached only through the owner's Caddy (HTTPS). Two things, nothing else:
  *   GET /m/<signed token>          one picture for Threads/Instagram to fetch, checked by the app
- *   GET /oauth/<threads|instagram> the network's return after login: sent on to the owner's FERMA page
+ *   GET /oauth/<threads|instagram|youtube> the network's return after login: sent on to the owner's FERMA page
  *                                  (FERMA_OWNER_URL: the domain with the password login, or this computer)
  * No identity is attached: the app answers /api/public-media without a user and only for valid signatures.
  */
@@ -192,7 +195,7 @@ export function createPublicGateway(upstreamPort = 8787, localOrigin = process.e
   return http.createServer((request, response) => {
     const url = new URL(request.url || '/', 'http://public');
     if (request.method !== 'GET' && request.method !== 'HEAD') { response.writeHead(405).end(); return; }
-    const oauth = /^\/oauth\/(threads|instagram)$/.exec(url.pathname);
+    const oauth = /^\/oauth\/(threads|instagram|youtube)$/.exec(url.pathname);
     if (oauth) {
       // The code goes into the address fragment: it is read by the owner's page, not logged by servers.
       const fields = new URLSearchParams({ provider: oauth[1] });
