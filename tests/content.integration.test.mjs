@@ -364,7 +364,7 @@ test('FERMA 2.0: Gudini import, versions, own Meta accounts, distribution and th
   assert.equal((await call({ owner: 'intruder', action: 'connect', provider: 'meta_threads', profileId: P })).status, 404);
 
   // ---- 6b. YouTube through the owner's own Google app: the channel connects; its hour-long access renews by itself
-  const GOOGLE_ID = '345772383702-abcdefghijklmnopq.apps.googleusercontent.com';
+  const GOOGLE_ID = '123456789012-abcdefghijklmnopq.apps.googleusercontent.com';
   assert.equal((await call({ action: 'saveApp', provider: 'youtube', appId: '1234567', appSecret: 'g'.repeat(35), redirectUri: 'https://pub.test/ferma/oauth/youtube' })).status, 400, 'a Google client ID has its own form');
   await ok({ action: 'saveApp', provider: 'youtube', appId: GOOGLE_ID, appSecret: 'g'.repeat(35), redirectUri: 'https://pub.test/ferma/oauth/youtube' });
   const ytStart = new URL((await ok({ action: 'connect', provider: 'youtube', profileId: P })).url);
